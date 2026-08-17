@@ -1,0 +1,40 @@
+# Build outputs
+bin/
+obj/
+out/
+
+# NuGet packages (binaries are not source)
+*.nupkg
+*.snupkg
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Rider
+.idea/
+
+# Test results
+TestResults/
+coverage/
+*.coverage
+*.coveragexml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node / VS Code extension
+node_modules/
+vscode/slimdep/out/
+vscode/slimdep/*.vsix
+
+# Claude Code session data
+.claude/
+
+# Temp / scratch
+*.tmp
+*.log

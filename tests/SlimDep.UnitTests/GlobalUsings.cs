@@ -1,0 +1,13 @@
+global using System;
+global using System.Collections.Generic;
+global using System.IO;
+global using System.Linq;
+global using System.Text.Json;
+global using System.Text.Json.Nodes;
+global using System.Threading;
+global using Xunit;
+global using FluentAssertions;
+global using SlimDep.Core.Models;
+global using SlimDep.Core.Exceptions;
+global using SlimDep.Analysis;
+global using SlimDep.Cli.Reporters;

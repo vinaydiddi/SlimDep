@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/SlimDep.Analysis/SlimDep.Analysis.csproj" />
+    <Project Path="src/SlimDep.Cli/SlimDep.Cli.csproj" />
+    <Project Path="src/SlimDep.Core/SlimDep.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/SlimDep.UnitTests/SlimDep.UnitTests.csproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,123 @@
+{
+  "name": "slimdep",
+  "displayName": "SlimDep",
+  "description": "Detect unused NuGet package references in .NET projects with inline CodeLens and a tree view.",
+  "version": "0.2.0",
+  "publisher": "VinayD24",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Linters",
+    "Other"
+  ],
+  "keywords": [
+    "nuget",
+    "dotnet",
+    "csharp",
+    "unused",
+    "dependencies",
+    "cleanup",
+    "package-reference"
+  ],
+  "icon": "resources/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://www.nuget.org/packages/SlimDep"
+  },
+  "homepage": "https://www.nuget.org/packages/SlimDep",
+  "activationEvents": [
+    "workspaceContains:**/*.csproj"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "slimdep.scan",
+        "title": "SlimDep: Scan for Unused Packages",
+        "icon": "$(search)"
+      },
+      {
+        "command": "slimdep.fix",
+        "title": "SlimDep: Remove All Unused Packages",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "slimdep.refresh",
+        "title": "SlimDep: Refresh",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "slimdep.ignorePackage",
+        "title": "SlimDep: Ignore this package (.slimdepignore)",
+        "icon": "$(mute)"
+      }
+    ],
+    "views": {
+      "explorer": [
+        {
+          "id": "slimdep.unusedPackages",
+          "name": "Unused NuGet Packages",
+          "icon": "$(package)",
+          "contextualTitle": "SlimDep"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "slimdep.refresh",
+          "when": "view == slimdep.unusedPackages",
+          "group": "navigation"
+        },
+        {
+          "command": "slimdep.fix",
+          "when": "view == slimdep.unusedPackages",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "slimdep.ignorePackage",
+          "when": "view == slimdep.unusedPackages && viewItem == unusedPackage",
+          "group": "inline"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "SlimDep",
+      "properties": {
+        "slimdep.toolPath": {
+          "type": "string",
+          "default": "slimdep",
+          "description": "Path to the slimdep CLI executable. Defaults to the global dotnet tool 'slimdep'."
+        },
+        "slimdep.autoScanOnOpen": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically scan projects when a .csproj file is opened."
+        },
+        "slimdep.includeTransitive": {
+          "type": "boolean",
+          "default": false,
+          "description": "Also scan transitive (indirect) packages for unused references (--include-transitive)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.90.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "@vscode/vsce": "^2.21.0",
+    "eslint": "^8.57.0",
+    "typescript": "^5.4.0"
+  }
+}

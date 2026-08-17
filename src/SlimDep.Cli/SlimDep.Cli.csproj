@@ -1,0 +1,65 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\SlimDep.Analysis\SlimDep.Analysis.csproj" />
+    <ProjectReference Include="..\SlimDep.Core\SlimDep.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.CommandLine" Version="2.0.9" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="SlimDep.UnitTests" />
+  </ItemGroup>
+
+  <!-- Include README and icon in the NuGet package -->
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\icon.png" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>slimdep</AssemblyName>
+
+    <!-- Tool settings -->
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>slimdep</ToolCommandName>
+
+    <!-- Package identity -->
+    <PackageId>SlimDep</PackageId>
+    <Version>1.1.0</Version>
+    <PackageProjectUrl>https://www.nuget.org/packages/SlimDep</PackageProjectUrl>
+    <Description>Detect and remove unused NuGet package references in .NET projects.</Description>
+    <PackageTags>nuget;dotnet-tool;unused;dependencies;packages;csproj;analyzer;cleanup;remove;detect;roslyn;static-analysis;sarif;package-reference;unused-packages;dependency-cleanup;dotnet;tool;net8;slim;nuget-cleanup;unused-nuget;dependency-analyzer;github-code-scanning</PackageTags>
+    <PackageIcon>icon.png</PackageIcon>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageReleaseNotes>v1.1.0 — SARIF output support.
+
+New features:
+- SARIF 2.1.0 output format (--format sarif): machine-readable static analysis results consumed natively by GitHub Code Scanning and Azure DevOps, enabling inline PR annotations with zero pipeline scripting
+- Line number detection: each SARIF result now points to the exact line of the unused &lt;PackageReference&gt; element in the .csproj file
+- Multi-project SARIF: scanning a folder emits a single well-formed SARIF document (one run, all findings, all projects listed as artifacts)
+
+Usage:
+  slimdep scan . --format sarif
+  slimdep scan . --format sarif --output results.sarif
+
+Breaking changes: none
+
+v1.0.1 — Patch release.
+- Fixed Supported Features table rendering on NuGet.org (CRLF → LF line endings in README)
+
+v1.0.0 features:
+- Fully-qualified name detection: packages used via Foo.Bar.Type syntax (no using directive) are no longer false-positives
+- .slimdepignore support: add a .slimdepignore file to suppress specific packages from analysis
+- --ignore flag: suppress packages inline without a file (slimdep scan . --ignore Pkg1 --ignore Pkg2)
+- slimdep ignore command: manage .slimdepignore from the CLI (add / remove / list)
+- Central Package Management (CPM) support: GlobalPackageReference entries are automatically excluded
+- XAML namespace analysis: xmlns clr-namespace declarations in .xaml files (WPF, MAUI) are now scanned
+- Razor / CSHTML namespace analysis: @using directives in .razor and .cshtml files (Blazor, MVC) are now scanned
+- Parallel multi-project scanning: all projects scanned concurrently (bounded by CPU count)</PackageReleaseNotes>
+  </PropertyGroup>
+
+</Project>
