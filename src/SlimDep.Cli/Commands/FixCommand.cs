@@ -1,4 +1,4 @@
-using System.Xml.Linq;
+using System.Xml;
 
 namespace SlimDep.Cli.Commands;
 
@@ -17,6 +17,7 @@ internal sealed class FixCommand : Command
         Options.Add(DryRunOption);
         Options.Add(SharedOptions.IncludeTransitiveOption);
         Options.Add(SharedOptions.IgnoreOption);
+        Options.Add(SharedOptions.NoDefaultIgnoresOption);
 
         this.SetAction(async (ParseResult parseResult, CancellationToken ct) =>
         {
@@ -24,6 +25,7 @@ internal sealed class FixCommand : Command
             bool dryRun = parseResult.GetValue(DryRunOption);
             bool includeTransitive = parseResult.GetValue(SharedOptions.IncludeTransitiveOption);
             string[] inlineIgnore = parseResult.GetValue(SharedOptions.IgnoreOption) ?? [];
+            bool useDefaultIgnores = !parseResult.GetValue(SharedOptions.NoDefaultIgnoresOption);
 
             IReadOnlyList<string> projects;
             try
@@ -56,12 +58,13 @@ internal sealed class FixCommand : Command
                         ProjectPath = projectPath,
                         IncludeTransitive = includeTransitive,
                         InlineIgnoredPackages = inlineIgnore.Length > 0 ? inlineIgnore : null,
+                        UseDefaultIgnores = useDefaultIgnores,
                         CancellationToken = ct,
                     }).ConfigureAwait(false), null);
                 }
                 catch (SlimDepException ex)
                 {
-                    scanResults[i] = (null, ex.Message);
+                    scanResults[i] = (null, $"{Path.GetFileName(projectPath)}: {ex.Message}");
                 }
                 finally
                 {
@@ -70,17 +73,28 @@ internal sealed class FixCommand : Command
             })).ConfigureAwait(false);
 
             // Sequential fix phase (file writes must be sequential for safety)
+            bool hadError = false;
+            bool anyWritten = false;
+
             foreach (var (result, errorMsg) in scanResults)
             {
                 if (errorMsg is not null)
                 {
                     Console.Error.WriteLine($"Error: {errorMsg}");
+                    hadError = true;
                     continue;
                 }
 
                 if (result is null) continue;
 
-                Console.WriteLine($"\nScanning {Path.GetFileName(result.ProjectPath)} ...");
+                string fileName = Path.GetFileName(result.ProjectPath);
+                Console.WriteLine($"\nScanning {fileName} ...");
+
+                // Explain what is deliberately left alone, so nothing disappears silently
+                foreach (var pin in result.PinnedPackages)
+                    Console.WriteLine($"  Kept {pin.Name} {pin.Version}: version pin over {pin.TransitiveVersion} ({string.Join(", ", pin.RequiredBy)}).");
+                if (result.SkippedPackages.Count > 0)
+                    Console.WriteLine($"  Kept {result.SkippedPackages.Count} package(s) on the default safe list: {string.Join(", ", result.SkippedPackages.Select(p => p.Name))}.");
 
                 if (!result.HasUnused)
                 {
@@ -88,9 +102,20 @@ internal sealed class FixCommand : Command
                     continue;
                 }
 
+                var direct = result.UnusedPackages.Where(p => !p.IsTransitive).ToList();
+                var transitive = result.UnusedPackages.Where(p => p.IsTransitive).ToList();
+
                 Console.WriteLine($"  Unused packages ({result.UnusedPackages.Count}):");
-                foreach (var pkg in result.UnusedPackages)
+                foreach (var pkg in direct)
                     Console.WriteLine($"    - {pkg.Name} {pkg.Version}");
+                foreach (var pkg in transitive)
+                    Console.WriteLine($"    - {pkg.Name} {pkg.Version} (transitive)");
+
+                if (transitive.Count > 0)
+                    Console.WriteLine($"  Note: {transitive.Count} transitive package(s) cannot be removed from the project file; they are pulled in by other packages.");
+
+                if (direct.Count == 0)
+                    continue;
 
                 if (dryRun)
                 {
@@ -98,41 +123,40 @@ internal sealed class FixCommand : Command
                     continue;
                 }
 
-                RemovePackagesFromCsproj(result.ProjectPath, result.UnusedPackages);
-                Console.WriteLine($"  Removed {result.UnusedPackages.Count} package(s) from {Path.GetFileName(result.ProjectPath)}.");
+                IReadOnlyList<string> removed;
+                try
+                {
+                    removed = CsprojEditor.RemovePackageReferences(result.ProjectPath, direct.Select(p => p.Name));
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or XmlException)
+                {
+                    Console.Error.WriteLine($"Error: could not update {fileName}: {ex.Message}");
+                    hadError = true;
+                    continue;
+                }
+
+                if (removed.Count > 0)
+                {
+                    anyWritten = true;
+                    Console.WriteLine($"  Removed {removed.Count} package(s) from {fileName}.");
+                }
+
+                var notFound = direct
+                    .Select(p => p.Name)
+                    .Where(n => !removed.Contains(n, StringComparer.OrdinalIgnoreCase))
+                    .ToList();
+                if (notFound.Count > 0)
+                {
+                    Console.WriteLine($"  Not removed — no <PackageReference> for these in {fileName} (likely declared in Directory.Build.props or an imported file):");
+                    foreach (string name in notFound)
+                        Console.WriteLine($"    - {name}");
+                }
             }
 
-            if (!dryRun)
+            if (anyWritten)
                 Console.WriteLine("\nRun 'dotnet restore' to update the lockfile.");
 
-            return 0;
+            return hadError ? 2 : 0;
         });
-    }
-
-    private static void RemovePackagesFromCsproj(string csprojPath, IReadOnlyList<UnusedPackage> toRemove)
-    {
-        var toRemoveNames = new HashSet<string>(
-            toRemove.Select(p => p.Name),
-            StringComparer.OrdinalIgnoreCase);
-
-        var doc = XDocument.Load(csprojPath);
-
-        var removed = doc.Descendants("PackageReference")
-            .Where(e =>
-            {
-                string? include = e.Attribute("Include")?.Value;
-                return include is not null && toRemoveNames.Contains(include);
-            })
-            .ToList();
-
-        foreach (var element in removed)
-        {
-            var parent = element.Parent;
-            element.Remove();
-            if (parent is not null && !parent.HasElements)
-                parent.Remove();
-        }
-
-        doc.Save(csprojPath);
     }
 }

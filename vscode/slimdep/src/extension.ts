@@ -1,3 +1,4 @@
+import * as path from 'path';
 import * as vscode from 'vscode';
 import { UnusedPackagesProvider, PackageItem } from './providers/treeViewProvider';
 import { CsprojCodeLensProvider } from './providers/codeLensProvider';
@@ -54,6 +55,8 @@ async function scanWorkspace(provider: UnusedPackagesProvider): Promise<void> {
             const toolPath = config.get<string>('toolPath', 'slimdep');
             const includeTransitive = config.get<boolean>('includeTransitive', false);
 
+            const failed: string[] = [];
+
             for (const file of csprojFiles) {
                 const args = ['scan', file.fsPath, '--format', 'json'];
                 if (includeTransitive) args.push('--include-transitive');
@@ -61,7 +64,7 @@ async function scanWorkspace(provider: UnusedPackagesProvider): Promise<void> {
                 const result = await runSlimdep(toolPath, args);
                 if (result.success && result.data) {
                     provider.addResult(file.fsPath, result.data);
-                } else if (!result.success && result.error?.includes('not recognized')) {
+                } else if (result.notFound) {
                     vscode.window.showErrorMessage(
                         'SlimDep: CLI not found. Run: dotnet tool install --global SlimDep',
                         'Open Terminal'
@@ -69,7 +72,15 @@ async function scanWorkspace(provider: UnusedPackagesProvider): Promise<void> {
                         if (action === 'Open Terminal') vscode.commands.executeCommand('workbench.action.terminal.new');
                     });
                     break;
+                } else {
+                    failed.push(`${path.basename(file.fsPath)}: ${result.error ?? 'unknown error'}`);
                 }
+            }
+
+            if (failed.length > 0) {
+                vscode.window.showWarningMessage(
+                    `SlimDep: ${failed.length} project(s) could not be scanned (has 'dotnet restore' been run?). ${failed[0]}`
+                );
             }
 
             provider.refresh();
@@ -94,11 +105,17 @@ async function fixUnusedPackages(provider: UnusedPackagesProvider): Promise<void
 
     const toolPath = vscode.workspace.getConfiguration('slimdep').get<string>('toolPath', 'slimdep');
 
+    const failed: string[] = [];
     for (const projectPath of provider.getProjectPaths()) {
-        await runSlimdep(toolPath, ['fix', projectPath]);
+        const result = await runSlimdep(toolPath, ['fix', projectPath]);
+        if (!result.success) failed.push(`${path.basename(projectPath)}: ${result.error ?? 'unknown error'}`);
     }
 
-    vscode.window.showInformationMessage('SlimDep: Unused packages removed. Run dotnet restore to update lockfile.');
+    if (failed.length > 0) {
+        vscode.window.showErrorMessage(`SlimDep: Failed to update ${failed.length} project(s). ${failed.join('; ')}`);
+    } else {
+        vscode.window.showInformationMessage('SlimDep: Unused packages removed. Run dotnet restore to update lockfile.');
+    }
     provider.clear();
     provider.refresh();
 }

@@ -189,9 +189,40 @@ public sealed class JsonReporterTests
     }
 
     [Fact]
-    public void RenderAll_EmptyList_ReturnsEmptyString()
+    public void RenderAll_EmptyList_ReturnsEmptyJsonArray()
     {
         var output = Reporter.RenderAll([]);
-        output.Should().BeEmpty();
+        JsonNode.Parse(output)!.AsArray().Should().BeEmpty();
+    }
+
+    [Fact]
+    public void RenderAll_MultipleResults_IsSingleValidJsonArray()
+    {
+        var results = new[]
+        {
+            MakeResult(@"C:\Repo\Api\Api.csproj", Pkg("Newtonsoft.Json")),
+            MakeResult(@"C:\Repo\Core\Core.csproj"),
+        };
+        var output = Reporter.RenderAll(results);
+
+        var array = JsonNode.Parse(output)!.AsArray();
+        array.Should().HaveCount(2);
+        array[0]!["unusedCount"]!.GetValue<int>().Should().Be(1);
+        array[1]!["unusedCount"]!.GetValue<int>().Should().Be(0);
+    }
+
+    [Fact]
+    public void Render_DirectPackage_OmitsTransitiveField()
+    {
+        var output = Reporter.Render(MakeResult(@"C:\Repo\App.csproj", Pkg("Pkg1")));
+        JsonNode.Parse(output)!["unusedPackages"]![0]!.AsObject().ContainsKey("transitive").Should().BeFalse();
+    }
+
+    [Fact]
+    public void Render_TransitivePackage_SetsTransitiveTrue()
+    {
+        var pkg = Pkg("Pkg1") with { IsTransitive = true };
+        var output = Reporter.Render(MakeResult(@"C:\Repo\App.csproj", pkg));
+        JsonNode.Parse(output)!["unusedPackages"]![0]!["transitive"]!.GetValue<bool>().Should().BeTrue();
     }
 }

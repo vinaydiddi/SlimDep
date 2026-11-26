@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -13,9 +14,25 @@ internal sealed class SarifReporter : IReporter
     private const string SarifSchema = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json";
     private const string SarifVersion = "2.1.0";
     private const string RuleId = "SLIMDEP001";
+    private const string UndeclaredRuleId = "SLIMDEP002";
     private const string ToolName = "SlimDep";
-    private const string ToolVersion = "1.1.0";
     private const string ToolUri = "https://www.nuget.org/packages/SlimDep";
+
+    /// <summary>
+    /// Tool version taken from the assembly (set by &lt;Version&gt; in the .csproj), so it can
+    /// never drift from the package version. Any "+commit" build metadata is stripped.
+    /// </summary>
+    internal static readonly string ToolVersion = GetToolVersion();
+
+    private static string GetToolVersion()
+    {
+        var assembly = typeof(SarifReporter).Assembly;
+        string? version = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+                          ?? assembly.GetName().Version?.ToString(3);
+        if (string.IsNullOrEmpty(version)) return "0.0.0";
+        int plus = version.IndexOf('+');
+        return plus > 0 ? version[..plus] : version;
+    }
 
     private static readonly JsonSerializerOptions WriteOptions = new()
     {
@@ -49,7 +66,7 @@ internal sealed class SarifReporter : IReporter
     {
         return new JsonObject
         {
-            ["tool"] = BuildTool(),
+            ["tool"] = BuildTool(includeUndeclaredRule: results.Any(r => r.HasUndeclared)),
             ["results"] = BuildResults(results),
             ["artifacts"] = BuildArtifacts(results),
         };
@@ -57,7 +74,7 @@ internal sealed class SarifReporter : IReporter
 
     // ── Tool descriptor ───────────────────────────────────────────────────────
 
-    private static JsonObject BuildTool()
+    private static JsonObject BuildTool(bool includeUndeclaredRule)
     {
         var rule = new JsonObject
         {
@@ -77,6 +94,30 @@ internal sealed class SarifReporter : IReporter
             ["defaultConfiguration"] = new JsonObject { ["level"] = "warning" },
         };
 
+        var rules = new JsonArray(rule);
+
+        // Only described when used, so existing SARIF consumers see an unchanged rule list
+        if (includeUndeclaredRule)
+        {
+            rules.Add(new JsonObject
+            {
+                ["id"] = UndeclaredRuleId,
+                ["name"] = "UndeclaredTransitivePackage",
+                ["shortDescription"] = new JsonObject
+                {
+                    ["text"] = "Transitive package used directly without a <PackageReference>.",
+                },
+                ["fullDescription"] = new JsonObject
+                {
+                    ["text"] = "The code uses namespaces from a package that is only referenced transitively. "
+                             + "If the package that brings it in is upgraded or removed, it can disappear and break the build. "
+                             + "Add an explicit <PackageReference>.",
+                },
+                ["helpUri"] = ToolUri,
+                ["defaultConfiguration"] = new JsonObject { ["level"] = "note" },
+            });
+        }
+
         return new JsonObject
         {
             ["driver"] = new JsonObject
@@ -84,7 +125,7 @@ internal sealed class SarifReporter : IReporter
                 ["name"] = ToolName,
                 ["version"] = ToolVersion,
                 ["informationUri"] = ToolUri,
-                ["rules"] = new JsonArray(rule),
+                ["rules"] = rules,
             },
         };
     }
@@ -100,7 +141,8 @@ internal sealed class SarifReporter : IReporter
             foreach (var pkg in scanResult.UnusedPackages)
             {
                 string version = string.IsNullOrEmpty(pkg.Version) ? string.Empty : $" {pkg.Version}";
-                string messageText = $"Unused package reference: {pkg.Name}{version}. {pkg.Reason}.";
+                string kind = pkg.IsTransitive ? "Unused transitive package" : "Unused package reference";
+                string messageText = $"{kind}: {pkg.Name}{version}. {pkg.Reason}.";
 
                 var physicalLocation = new JsonObject
                 {
@@ -116,11 +158,29 @@ internal sealed class SarifReporter : IReporter
                 arr.Add(new JsonObject
                 {
                     ["ruleId"] = RuleId,
-                    ["level"] = "warning",
+                    // Transitive findings are informational: they can't be fixed in the project file
+                    ["level"] = pkg.IsTransitive ? "note" : "warning",
                     ["message"] = new JsonObject { ["text"] = messageText },
                     ["locations"] = new JsonArray(new JsonObject
                     {
                         ["physicalLocation"] = physicalLocation,
+                    }),
+                });
+            }
+
+            foreach (var pkg in scanResult.UndeclaredPackages)
+            {
+                arr.Add(new JsonObject
+                {
+                    ["ruleId"] = UndeclaredRuleId,
+                    ["level"] = "note",
+                    ["message"] = new JsonObject { ["text"] = $"Undeclared dependency: {pkg.Name} {pkg.Version}. {pkg.Reason}" },
+                    ["locations"] = new JsonArray(new JsonObject
+                    {
+                        ["physicalLocation"] = new JsonObject
+                        {
+                            ["artifactLocation"] = new JsonObject { ["uri"] = ToFileUri(scanResult.ProjectPath) },
+                        },
                     }),
                 });
             }

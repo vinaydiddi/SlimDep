@@ -2,7 +2,7 @@
   "name": "slimdep",
   "displayName": "SlimDep",
   "description": "Detect unused NuGet package references in .NET projects with inline CodeLens and a tree view.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "VinayD24",
   "engines": {
     "vscode": "^1.90.0"
@@ -100,7 +100,7 @@
         "slimdep.includeTransitive": {
           "type": "boolean",
           "default": false,
-          "description": "Also scan transitive (indirect) packages for unused references (--include-transitive)."
+          "description": "Also report unused transitive (indirect) packages (--include-transitive). These are informational and cannot be removed from the project file."
         }
       }
     }
