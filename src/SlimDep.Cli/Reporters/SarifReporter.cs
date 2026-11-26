@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -14,8 +15,23 @@ internal sealed class SarifReporter : IReporter
     private const string SarifVersion = "2.1.0";
     private const string RuleId = "SLIMDEP001";
     private const string ToolName = "SlimDep";
-    private const string ToolVersion = "1.1.0";
     private const string ToolUri = "https://www.nuget.org/packages/SlimDep";
+
+    /// <summary>
+    /// Tool version taken from the assembly (set by &lt;Version&gt; in the .csproj), so it can
+    /// never drift from the package version. Any "+commit" build metadata is stripped.
+    /// </summary>
+    internal static readonly string ToolVersion = GetToolVersion();
+
+    private static string GetToolVersion()
+    {
+        var assembly = typeof(SarifReporter).Assembly;
+        string? version = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+                          ?? assembly.GetName().Version?.ToString(3);
+        if (string.IsNullOrEmpty(version)) return "0.0.0";
+        int plus = version.IndexOf('+');
+        return plus > 0 ? version[..plus] : version;
+    }
 
     private static readonly JsonSerializerOptions WriteOptions = new()
     {
@@ -100,7 +116,8 @@ internal sealed class SarifReporter : IReporter
             foreach (var pkg in scanResult.UnusedPackages)
             {
                 string version = string.IsNullOrEmpty(pkg.Version) ? string.Empty : $" {pkg.Version}";
-                string messageText = $"Unused package reference: {pkg.Name}{version}. {pkg.Reason}.";
+                string kind = pkg.IsTransitive ? "Unused transitive package" : "Unused package reference";
+                string messageText = $"{kind}: {pkg.Name}{version}. {pkg.Reason}.";
 
                 var physicalLocation = new JsonObject
                 {
@@ -116,7 +133,8 @@ internal sealed class SarifReporter : IReporter
                 arr.Add(new JsonObject
                 {
                     ["ruleId"] = RuleId,
-                    ["level"] = "warning",
+                    // Transitive findings are informational: they can't be fixed in the project file
+                    ["level"] = pkg.IsTransitive ? "note" : "warning",
                     ["message"] = new JsonObject { ["text"] = messageText },
                     ["locations"] = new JsonArray(new JsonObject
                     {

@@ -9,6 +9,8 @@ namespace SlimDep.Analysis;
 /// </summary>
 public sealed class ProjectAnalyzer : IProjectAnalyzer
 {
+    internal const string DirectReason = "No namespace from this package appears in any using directive";
+
     public async Task<ScanResult> AnalyzeAsync(ScanOptions options)
     {
         string projectPath = Path.GetFullPath(options.ProjectPath);
@@ -25,13 +27,17 @@ public sealed class ProjectAnalyzer : IProjectAnalyzer
 
         // 1. Parse project.assets.json → list of (package, version, namespaces)
         IReadOnlyList<PackageNamespaceInfo> packageInfos = await Task.Run(
-            () => AssetsFileParser.Parse(assetsFile),
+            () => AssetsFileParser.Parse(assetsFile, options.IncludeTransitive),
             options.CancellationToken).ConfigureAwait(false);
 
-        // 2. Collect all used namespaces from .cs, .xaml, and .razor source files
-        HashSet<string> usedNamespaces = await Task.Run(
-            () => SourceAnalyzer.CollectUsedNamespaces(projectDir, options.CancellationToken),
-            options.CancellationToken).ConfigureAwait(false);
+        // 2. Collect all used namespaces from .cs, .xaml, and .razor source files,
+        //    plus global usings declared in MSBuild (ImplicitUsings / <Using> items)
+        HashSet<string> usedNamespaces = await Task.Run(() =>
+        {
+            var ns = SourceAnalyzer.CollectUsedNamespaces(projectDir, options.CancellationToken);
+            ns.UnionWith(ProjectUsingsResolver.Resolve(projectPath, options.CancellationToken));
+            return ns;
+        }, options.CancellationToken).ConfigureAwait(false);
 
         // 3. Load .slimdepignore (walk up from project directory to solution root)
         //    and merge with any inline --ignore values passed via CLI
@@ -63,21 +69,37 @@ public sealed class ProjectAnalyzer : IProjectAnalyzer
                 continue;
 
             bool hasMatch = pkg.Namespaces.Any(ns => usedNamespaces.Contains(ns));
+            if (hasMatch)
+                continue;
 
-            if (!hasMatch)
+            if (pkg.IsDirect)
             {
+                unused.Add(new UnusedPackage(pkg.Name, pkg.Version, DirectReason));
+            }
+            else
+            {
+                string via = pkg.IntroducedBy.Count > 0
+                    ? $" (pulled in by {string.Join(", ", pkg.IntroducedBy)})"
+                    : string.Empty;
                 unused.Add(new UnusedPackage(
                     pkg.Name,
                     pkg.Version,
-                    "No namespace from this package appears in any using directive"));
+                    $"Transitive dependency{via}; no namespace from it is used directly")
+                {
+                    IsTransitive = true,
+                });
             }
         }
 
-        // 6. Enrich unused packages with line numbers from the .csproj XML
-        var unusedNames = new HashSet<string>(unused.Select(p => p.Name), StringComparer.OrdinalIgnoreCase);
+        // 6. Enrich unused direct packages with line numbers from the .csproj XML
+        var unusedNames = new HashSet<string>(
+            unused.Where(p => !p.IsTransitive).Select(p => p.Name),
+            StringComparer.OrdinalIgnoreCase);
         var lineNumbers = GetPackageReferenceLineNumbers(projectPath, unusedNames);
         var unusedWithLines = unused
-            .Select(p => lineNumbers.TryGetValue(p.Name, out int line) ? p with { LineNumber = line } : p)
+            .Select(p => !p.IsTransitive && lineNumbers.TryGetValue(p.Name, out int line) ? p with { LineNumber = line } : p)
+            .OrderBy(p => p.IsTransitive)
+            .ThenBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
         sw.Stop();
@@ -86,7 +108,7 @@ public sealed class ProjectAnalyzer : IProjectAnalyzer
         {
             ProjectPath = projectPath,
             UnusedPackages = unusedWithLines,
-            TotalDirectPackages = packageInfos.Count,
+            TotalDirectPackages = packageInfos.Count(p => p.IsDirect),
             Duration = sw.Elapsed,
         };
     }
@@ -98,10 +120,12 @@ public sealed class ProjectAnalyzer : IProjectAnalyzer
     private static Dictionary<string, int> GetPackageReferenceLineNumbers(string csprojPath, HashSet<string> packageNames)
     {
         var result = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        if (packageNames.Count == 0) return result;
         try
         {
             var doc = XDocument.Load(csprojPath, LoadOptions.SetLineInfo);
-            foreach (var elem in doc.Descendants("PackageReference"))
+            // Match on local name so legacy projects with the MSBuild xmlns are handled too
+            foreach (var elem in doc.Descendants().Where(e => e.Name.LocalName == "PackageReference"))
             {
                 string? include = elem.Attribute("Include")?.Value;
                 if (include is not null && packageNames.Contains(include)
@@ -136,7 +160,7 @@ public sealed class ProjectAnalyzer : IProjectAnalyzer
                 try
                 {
                     var doc = XDocument.Load(propsPath);
-                    foreach (var elem in doc.Descendants("GlobalPackageReference"))
+                    foreach (var elem in doc.Descendants().Where(e => e.Name.LocalName == "GlobalPackageReference"))
                     {
                         string? include = elem.Attribute("Include")?.Value;
                         if (include is not null)

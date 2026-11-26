@@ -166,6 +166,31 @@ public sealed class SourceAnalyzerTests : IDisposable
         result.Should().Contain("MyApp.ViewModels");
     }
 
+    // ── Conditional compilation and global:: ──────────────────────────────────
+
+    [Fact]
+    public void CollectUsedNamespaces_UsingInsideIfBlock_Detected()
+    {
+        WriteFile("Compat.cs", "#if NET48\nusing Legacy.Only;\n#else\nusing Modern.Only;\n#endif");
+
+        var result = SourceAnalyzer.CollectUsedNamespaces(_tempDir, CancellationToken.None);
+
+        result.Should().Contain("Legacy.Only");
+        result.Should().Contain("Modern.Only");
+    }
+
+    [Fact]
+    public void CollectUsedNamespaces_GlobalAliasPrefix_Stripped()
+    {
+        WriteFile("G.cs", "global using global::Newtonsoft.Json;\nclass C { global::Serilog.ILogger L; }");
+
+        var result = SourceAnalyzer.CollectUsedNamespaces(_tempDir, CancellationToken.None);
+
+        result.Should().Contain("Newtonsoft.Json");
+        result.Should().Contain("Serilog");
+        result.Should().NotContain(n => n.StartsWith("global::"));
+    }
+
     private void WriteFile(string relativePath, string content)
     {
         string fullPath = Path.IsPathRooted(relativePath)

@@ -35,6 +35,19 @@ internal static class SourceAnalyzer
                 var root = tree.GetRoot(ct);
                 CollectUsingDirectives(root, usedNamespaces);
                 CollectFullyQualifiedNames(root, usedNamespaces);
+
+                // Code inside #if blocks (e.g. #if NET48 in multi-targeted projects) is parsed
+                // as disabled text when no symbols are defined. Re-parse with every symbol the
+                // file tests so usings in those blocks are also counted.
+                var symbols = CollectConditionalSymbols(root);
+                if (symbols.Count > 0)
+                {
+                    var altRoot = CSharpSyntaxTree
+                        .ParseText(source, parseOptions.WithPreprocessorSymbols(symbols))
+                        .GetRoot(ct);
+                    CollectUsingDirectives(altRoot, usedNamespaces);
+                    CollectFullyQualifiedNames(altRoot, usedNamespaces);
+                }
             }
             catch (IOException) { /* skip unreadable files */ }
         }
@@ -62,12 +75,7 @@ internal static class SourceAnalyzer
                 // Strip generic arguments: "Foo.Bar<T>" → "Foo.Bar"
                 int genericIdx = name.IndexOf('<');
                 if (genericIdx > 0) name = name[..genericIdx];
-                name = name.Trim();
-                if (!string.IsNullOrEmpty(name))
-                {
-                    result.Add(name);
-                    AddParentNamespaces(name, result);
-                }
+                AddNamespace(name, result); // also strips global::
             }
             // MemberAccessExpressionSyntax covers expression positions:
             //   Foo.Bar.Method();  Foo.Bar.StaticProp
@@ -159,20 +167,62 @@ internal static class SourceAnalyzer
 
     // ── Shared helpers ────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Parses a single C# file (e.g. a generated <c>GlobalUsings.g.cs</c>) and adds its
+    /// using directives to <paramref name="result"/>.
+    /// </summary>
+    internal static void CollectUsingsFromFile(string filePath, HashSet<string> result, CancellationToken ct)
+    {
+        try
+        {
+            var tree = CSharpSyntaxTree.ParseText(File.ReadAllText(filePath), new CSharpParseOptions(LanguageVersion.Preview));
+            CollectUsingDirectives(tree.GetRoot(ct), result);
+        }
+        catch (IOException) { /* skip unreadable files */ }
+    }
+
+    private static List<string> CollectConditionalSymbols(Microsoft.CodeAnalysis.SyntaxNode root)
+    {
+        var symbols = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var directive in root.DescendantNodes(descendIntoTrivia: true).OfType<DirectiveTriviaSyntax>())
+        {
+            ExpressionSyntax? condition = directive switch
+            {
+                IfDirectiveTriviaSyntax ifDirective => ifDirective.Condition,
+                ElifDirectiveTriviaSyntax elifDirective => elifDirective.Condition,
+                _ => null,
+            };
+            if (condition is null) continue;
+
+            foreach (var id in condition.DescendantNodesAndSelf().OfType<IdentifierNameSyntax>())
+                symbols.Add(id.Identifier.ValueText);
+        }
+        return symbols.ToList();
+    }
+
     private static void CollectUsingDirectives(Microsoft.CodeAnalysis.SyntaxNode root, HashSet<string> result)
     {
         foreach (var node in root.DescendantNodes())
         {
             if (node is UsingDirectiveSyntax usingDirective && usingDirective.Name is not null)
-            {
-                string ns = usingDirective.Name.ToString();
-                if (!string.IsNullOrEmpty(ns))
-                {
-                    result.Add(ns);
-                    AddParentNamespaces(ns, result);
-                }
-            }
+                AddNamespace(usingDirective.Name.ToString(), result);
         }
+    }
+
+    /// <summary>
+    /// Adds <paramref name="ns"/> and all its parent namespaces to <paramref name="result"/>,
+    /// stripping any <c>global::</c> alias qualifier first.
+    /// </summary>
+    internal static void AddNamespace(string ns, HashSet<string> result)
+    {
+        ns = ns.Trim();
+        if (ns.StartsWith("global::", StringComparison.Ordinal))
+            ns = ns["global::".Length..];
+
+        if (string.IsNullOrEmpty(ns)) return;
+
+        result.Add(ns);
+        AddParentNamespaces(ns, result);
     }
 
     private static void AddParentNamespaces(string fullNamespace, HashSet<string> result)

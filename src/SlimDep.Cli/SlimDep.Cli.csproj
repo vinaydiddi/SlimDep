@@ -29,13 +29,26 @@
 
     <!-- Package identity -->
     <PackageId>SlimDep</PackageId>
-    <Version>1.1.0</Version>
+    <Version>1.1.1</Version>
     <PackageProjectUrl>https://www.nuget.org/packages/SlimDep</PackageProjectUrl>
     <Description>Detect and remove unused NuGet package references in .NET projects.</Description>
     <PackageTags>nuget;dotnet-tool;unused;dependencies;packages;csproj;analyzer;cleanup;remove;detect;roslyn;static-analysis;sarif;package-reference;unused-packages;dependency-cleanup;dotnet;tool;net8;slim;nuget-cleanup;unused-nuget;dependency-analyzer;github-code-scanning</PackageTags>
     <PackageIcon>icon.png</PackageIcon>
     <PackageReadmeFile>README.md</PackageReadmeFile>
-    <PackageReleaseNotes>v1.1.0 — SARIF output support.
+    <PackageReleaseNotes>v1.1.1 — Bug-fix release.
+
+Fixes:
+- --include-transitive now works: unused transitive packages are reported (marked transitive, with the reference that brings them in); fix lists but never removes them
+- --format json / sarif to stdout now emit only the report (progress lines no longer corrupt it); multi-project JSON is a single array
+- Multi-targeted projects: every target framework is analysed, and usings inside #if blocks are counted
+- SDK implicit usings, &lt;Using&gt; items (csproj / Directory.Build.*) and generated GlobalUsings.g.cs are honoured; avoids removing e.g. Microsoft.Extensions.Hosting from Worker projects
+- fix keeps formatting, comments, line endings, BOM and XML declaration; keeps conditional or commented ItemGroups; reports packages it could not find in the project file; exits 2 on errors
+- Legacy MSBuild xmlns projects and global:: qualified names handled
+- SARIF tool version now comes from the assembly version
+- Invalid --format values are rejected instead of silently falling back to console
+- Implicit SDK references (autoReferenced) are never reported
+
+v1.1.0 — SARIF output support.
 
 New features:
 - SARIF 2.1.0 output format (--format sarif): machine-readable static analysis results consumed natively by GitHub Code Scanning and Azure DevOps, enabling inline PR annotations with zero pipeline scripting

@@ -7,11 +7,19 @@ internal static class SharedOptions
         Description = "Path to a .csproj file or a directory to search recursively for .csproj files.",
     };
 
-    internal static readonly Option<string> OutputFormatOption = new("--format")
+    internal static readonly Option<string> OutputFormatOption = CreateFormatOption();
+
+    private static Option<string> CreateFormatOption()
     {
-        Description = "Output format: console | json | sarif",
-        DefaultValueFactory = _ => "console",
-    };
+        var option = new Option<string>("--format")
+        {
+            Description = "Output format: console | json | sarif",
+            DefaultValueFactory = _ => "console",
+        };
+        // Reject typos like '--format jsn' instead of silently falling back to console output
+        option.AcceptOnlyFromAmong("console", "json", "sarif");
+        return option;
+    }
 
     internal static readonly Option<string?> OutputFileOption = new("--output")
     {

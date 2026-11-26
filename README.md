@@ -4,7 +4,7 @@
 [![NuGet Downloads](https://img.shields.io/nuget/dt/SlimDep.svg)](https://nuget.org/packages/SlimDep)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**SlimDep** is a .NET global tool (`v1.1.0`) that detects and removes unused NuGet package references from `.csproj` files.
+**SlimDep** is a .NET global tool (`v1.1.1`) that detects and removes unused NuGet package references from `.csproj` files.
 
 Over time, .NET projects accumulate dead package references — packages added during development or experimentation that are never cleaned up. SlimDep finds them automatically and can remove them in one command.
 
@@ -45,7 +45,7 @@ dotnet restore
 
 ```bash
 slimdep --version
-# output: 1.1.0
+# output: 1.1.1
 ```
 
 ---
@@ -68,9 +68,11 @@ slimdep scan <project> [options]
 |---|---|---|
 | `--format` | `console` | Output format: `console`, `json`, or `sarif` |
 | `--output <file>` | _(stdout)_ | Write report to a file instead of printing |
-| `--include-transitive` | off | Also check transitive (indirect) packages |
+| `--include-transitive` | off | Also report transitive (indirect) packages whose namespaces are never used directly |
 | `--ignore <pkg>` | _(none)_ | Suppress a package from analysis (repeatable) |
 | `-?, -h, --help` | | Show help |
+
+> **Transitive findings** are informational. They show which direct package or project reference brings each one in, but they can't be removed from your project file. `fix` lists them and leaves them alone. Most transitive packages are used only by the package that depends on them, so expect a long list.
 
 **Examples:**
 ```bash
@@ -113,7 +115,7 @@ Scanning MyApp.Core.csproj ...
   ✓ All packages are used. Nothing to remove.
 ```
 
-**Sample JSON output** (`--format json`):
+**Sample JSON output** (`--format json`). A single project produces one object; a folder with several projects produces a JSON array of these objects. Transitive findings add `"transitive": true`. When JSON or SARIF goes to stdout, stdout holds only that document, so it can be piped straight into `jq` or another tool.
 ```json
 {
   "projectPath": "C:\\Dev\\MySolution\\src\\MyApp.Api\\MyApp.Api.csproj",
@@ -142,7 +144,7 @@ Scanning MyApp.Core.csproj ...
   "version": "2.1.0",
   "runs": [
     {
-      "tool": { "driver": { "name": "SlimDep", "version": "1.1.0", "rules": [{ "id": "SLIMDEP001" }] } },
+      "tool": { "driver": { "name": "SlimDep", "version": "1.1.1", "rules": [{ "id": "SLIMDEP001" }] } },
       "results": [
         {
           "ruleId": "SLIMDEP001",
@@ -177,7 +179,7 @@ slimdep fix <project> [options]
 | Option | Default | Description |
 |---|---|---|
 | `--dry-run` | off | Preview removals — no files written |
-| `--include-transitive` | off | Also remove unused transitive packages |
+| `--include-transitive` | off | Also list unused transitive packages (they are reported, not removed) |
 | `--ignore <pkg>` | _(none)_ | Suppress a package from analysis (repeatable) |
 | `-?, -h, --help` | | Show help |
 
@@ -211,6 +213,10 @@ Scanning MyApp.Core.csproj ...
 
 Run 'dotnet restore' to update the lockfile.
 ```
+
+`fix` edits only the matching `<PackageReference>` lines. Formatting, comments, line endings, BOM and the XML declaration stay as they were. An `<ItemGroup>` left empty is removed unless it has a `Condition`/`Label` or contains comments. A package declared outside the project file (e.g. in `Directory.Build.props`) is listed as "not removed" for you to handle by hand.
+
+**Exit codes:** `0` = success · `2` = one or more projects could not be scanned or updated
 
 After fixing, run:
 ```bash
@@ -319,7 +325,10 @@ Swashbuckle.AspNetCore
 | GitHub Code Scanning / Azure DevOps inline PR annotations via SARIF | ✅ |
 | Write report to a file (`--output`) | ✅ |
 | Detect unused direct package references | ✅ |
-| Detect unused transitive (indirect) package references (`--include-transitive`) | ✅ |
+| Report unused transitive (indirect) packages with the reference that brings them in (`--include-transitive`) | ✅ |
+| Multi-targeted projects: all target frameworks analysed, `#if` blocks included | ✅ |
+| SDK implicit usings, `<Using>` items and generated `GlobalUsings.g.cs` honoured | ✅ |
+| Formatting-preserving `fix` (whitespace, comments, line endings, BOM kept) | ✅ |
 | Skip packages with no exported namespaces (build tools, source generators) | ✅ |
 | Auto-remove unused packages from `.csproj` (`fix` command) | ✅ |
 | Dry-run mode — preview removals without writing (`--dry-run`) | ✅ |
@@ -349,7 +358,9 @@ Swashbuckle.AspNetCore
 ## Limitations
 
 - Packages used only in XAML `x:Type` or code-behind without a `using` or `clr-namespace` declaration may be reported as unused
-- Does not analyse `.cshtml` view imports from `_ViewImports.cshtml` automatically (add `@using` directives there to resolve)
+- Matching is by namespace. If a package puts types into a namespace your code already imports for another reason (common with `Microsoft.Extensions.*` extension methods), it counts as used, and SDK implicit usings make this more likely
+- MSBuild conditions on `<Using>` items are not evaluated; conditional usings are treated as always present
+- Code under complex `#if` expressions that need some symbols defined and others undefined (e.g. `#if A && !B`) may be missed
 - Requires `obj/project.assets.json` — run `dotnet restore` before scanning
 - Source generators and build-only packages (no exported namespaces) are automatically excluded
 

@@ -27,12 +27,14 @@ internal sealed class ConsoleReporter : IReporter
         foreach (var pkg in result.UnusedPackages)
         {
             string version = string.IsNullOrEmpty(pkg.Version) ? "" : $" {pkg.Version}";
-            sb.AppendLine($"    • {pkg.Name}{version}");
+            string tag = pkg.IsTransitive ? " (transitive)" : "";
+            sb.AppendLine($"    • {pkg.Name}{version}{tag}");
             sb.AppendLine($"      {pkg.Reason}");
         }
 
         sb.AppendLine();
-        sb.AppendLine("  Run 'slimdep fix <project>' to remove them automatically.");
+        if (result.UnusedPackages.Any(p => !p.IsTransitive))
+            sb.AppendLine("  Run 'slimdep fix <project>' to remove them automatically.");
 
         return sb.ToString();
     }
