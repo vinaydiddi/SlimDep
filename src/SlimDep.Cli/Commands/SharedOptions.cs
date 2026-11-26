@@ -31,6 +31,16 @@ internal static class SharedOptions
         Description = "Also report unused transitive (indirect) packages.",
     };
 
+    internal static readonly Option<bool> NoDefaultIgnoresOption = new("--no-default-ignores")
+    {
+        Description = "Also report packages on the built-in safe list (test adapters, coverage, SourceLink, design-time tools) and PrivateAssets=\"all\" references.",
+    };
+
+    internal static readonly Option<bool> FailOnUndeclaredOption = new("--fail-on-undeclared")
+    {
+        Description = "Exit with code 1 when transitive packages are used directly without a <PackageReference> (SLIMDEP002).",
+    };
+
     internal static readonly Option<string[]> IgnoreOption = new("--ignore")
     {
         Description = "Suppress one or more packages from analysis. Can be repeated: --ignore Pkg1 --ignore Pkg2",

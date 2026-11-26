@@ -1,6 +1,6 @@
 # SlimDep — Usage Guide
 
-**Version:** `1.1.1` &nbsp;|&nbsp; **Runtime:** .NET 8, 9, or 10 &nbsp;|&nbsp; **License:** MIT
+**Version:** `1.2.0` &nbsp;|&nbsp; **Runtime:** .NET 8, 9, or 10 &nbsp;|&nbsp; **License:** MIT
 
 SlimDep detects and removes unused NuGet package references from `.NET` projects.
 
@@ -60,6 +60,9 @@ dotnet restore
 | Project-level usings | SDK implicit usings, `<Using>` items and generated `GlobalUsings.g.cs` are honoured |
 | Ignore list | `.slimdepignore`, `--ignore`, and `slimdep ignore add/remove/list` |
 | SARIF output | `--format sarif` for GitHub Code Scanning / Azure DevOps |
+| SLIMDEP002 | Flags transitive packages your code uses directly without a `<PackageReference>` |
+| Version pins | Direct references that raise a transitive version are kept, never reported as unused |
+| Built-in safe list | Test adapters, coverage, SourceLink, design-time tools and `PrivateAssets="all"` are never reported |
 | Skip build-tool-only packages | Packages with no exported namespaces are never flagged |
 | Auto-remove from `.csproj` | `fix` command edits the file in-place |
 | Dry-run preview | `--dry-run` shows what would be removed without writing |
@@ -90,6 +93,15 @@ slimdep scan <project> [options]
 | `--output <file>` | _(stdout)_ | Write the report to a file instead of printing to the terminal |
 | `--include-transitive` | off | Also report unused transitive (indirect) dependencies |
 | `--ignore <pkg>` | _(none)_ | Suppress a package from analysis (repeatable) |
+| `--no-default-ignores` | off | Also report packages on the built-in safe list |
+| `--fail-on-undeclared` | off | Exit with `1` when SLIMDEP002 findings exist |
+
+Besides unused packages, the report lists:
+- **SLIMDEP002**: transitive packages used directly. Add an explicit `<PackageReference>` for each. Informational unless `--fail-on-undeclared` is passed.
+- **Version pins**: unused-looking references kept because removing them would downgrade a transitive dependency.
+- **Safe-list skips**: packages not reported because they work without code references.
+
+See the README's "What SlimDep reports" section for the full rules.
 
 With `--format json` or `--format sarif` and no `--output`, stdout contains only the report, so it can be piped. Scanning several projects as JSON produces one array.
 
@@ -200,6 +212,9 @@ Removes the unused `<PackageReference>` entries directly from the `.csproj` file
 | `--dry-run` | off | Preview what would be removed — no files are written |
 | `--include-transitive` | off | Also list unused transitive packages (they cannot be removed from the project file) |
 | `--ignore <pkg>` | _(none)_ | Suppress a package from analysis (repeatable) |
+| `--no-default-ignores` | off | Also remove packages on the built-in safe list |
+
+Version pins and safe-list packages are never removed; `fix` prints a "Kept" line for each.
 
 `fix` only touches the matching `<PackageReference>` lines and keeps the rest of the file as-is. It exits with `2` if any project could not be scanned or written.
 

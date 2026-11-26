@@ -38,5 +38,27 @@ internal sealed class JsonReporter : IReporter
             // Omitted for direct packages so the output shape is unchanged for existing consumers
             transitive = p.IsTransitive ? true : (bool?)null,
         }),
+        undeclaredPackages = result.UndeclaredPackages.Select(p => new
+        {
+            name = p.Name,
+            version = p.Version,
+            introducedBy = p.IntroducedBy,
+            usedNamespaces = p.UsedNamespaces,
+            reason = p.Reason,
+        }),
+        pinnedPackages = result.PinnedPackages.Select(p => new
+        {
+            name = p.Name,
+            version = p.Version,
+            transitiveVersion = p.TransitiveVersion,
+            requiredBy = p.RequiredBy,
+            reason = p.Reason,
+        }),
+        skippedPackages = result.SkippedPackages.Select(p => new
+        {
+            name = p.Name,
+            version = p.Version,
+            reason = p.Reason,
+        }),
     };
 }

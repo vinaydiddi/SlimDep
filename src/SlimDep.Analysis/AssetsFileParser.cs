@@ -7,9 +7,10 @@ using System.Collections.Concurrent;
 namespace SlimDep.Analysis;
 
 /// <summary>
-/// Parses <c>project.assets.json</c> and resolves which namespaces each
-/// <c>PackageReference</c> exposes, by reading type metadata from the DLLs in
-/// the local NuGet package cache. Results are cached in-process for speed.
+/// Parses <c>project.assets.json</c> and resolves which namespaces each package exposes,
+/// by reading type metadata from the DLLs in the local NuGet package cache. Also records the
+/// dependency graph (who brings in which package, at which minimum version).
+/// Namespace results are cached in-process for speed.
 /// </summary>
 internal sealed class AssetsFileParser
 {
@@ -17,11 +18,11 @@ internal sealed class AssetsFileParser
     private static readonly ConcurrentDictionary<string, IReadOnlySet<string>> _namespaceCache = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
-    /// Returns the direct package references (and, when <paramref name="includeTransitive"/>
-    /// is set, every transitive package too) with their exported namespace sets.
-    /// All target frameworks are merged, so multi-targeted projects are fully covered.
+    /// Returns every direct package and every transitive package that has assemblies, with
+    /// exported namespaces and dependency information. All target frameworks are merged, so
+    /// multi-targeted projects are fully covered.
     /// </summary>
-    internal static IReadOnlyList<PackageNamespaceInfo> Parse(string assetsFilePath, bool includeTransitive = false)
+    internal static AssetsInfo Parse(string assetsFilePath)
     {
         if (!File.Exists(assetsFilePath))
             throw new SlimDepException($"project.assets.json not found at '{assetsFilePath}'. Run 'dotnet restore' first.");
@@ -49,18 +50,29 @@ internal sealed class AssetsFileParser
         //    across ALL target frameworks. Implicit SDK references (autoReferenced) are skipped
         //    because they are not in the project file and cannot be removed.
         var directNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var privateAssetsAll = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var frameworkReferences = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var frameworks = doc["project"]?["frameworks"]?.AsObject();
         if (frameworks is not null)
         {
             foreach (var fw in frameworks)
             {
-                var deps = fw.Value?["dependencies"]?.AsObject();
-                if (deps is null) continue;
-                foreach (var dep in deps)
+                if (fw.Value?["dependencies"] is JsonObject deps)
                 {
-                    if (IsAutoReferenced(dep.Value)) continue;
-                    directNames.Add(dep.Key);
+                    foreach (var dep in deps)
+                    {
+                        if (GetBool(dep.Value, "autoReferenced")) continue;
+                        directNames.Add(dep.Key);
+
+                        // PrivateAssets="all" is recorded as suppressParent: "All"
+                        if (GetString(dep.Value, "suppressParent")?.Contains("All", StringComparison.OrdinalIgnoreCase) == true)
+                            privateAssetsAll.Add(dep.Key);
+                    }
                 }
+
+                if (fw.Value?["frameworkReferences"] is JsonObject fwRefs)
+                    foreach (var fwRef in fwRefs)
+                        frameworkReferences.Add(fwRef.Key);
             }
         }
 
@@ -71,21 +83,22 @@ internal sealed class AssetsFileParser
         {
             foreach (var lib in libraries)
             {
-                var path = lib.Value?["path"]?.GetValue<string>();
+                var path = GetString(lib.Value, "path");
                 if (!string.IsNullOrEmpty(path))
                     libraryPaths[lib.Key] = path;
             }
         }
 
         var targets = doc["targets"]?.AsObject();
-        if (targets is null) return [];
+        if (targets is null)
+            return new AssetsInfo { Packages = [], FrameworkReferences = frameworkReferences.ToList() };
 
-        // 4. Walk every target (one per TFM, plus RID-specific ones) and merge namespaces
-        //    per package. Previously only the first target was read, so packages used only
-        //    by a secondary TFM were never analysed.
+        // 4. Walk every target (one per TFM, plus RID-specific ones) and merge per package.
         var merged = new Dictionary<string, Accumulator>(StringComparer.OrdinalIgnoreCase);
-        // dependency name → packages that depend on it (used to explain transitive findings)
+        // dependency name → packages/projects that depend on it (reverse graph)
         var dependents = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        // dependency name → (dependent label → highest minimum version it asks for)
+        var requirements = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
         var projectNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var target in targets)
@@ -100,38 +113,41 @@ internal sealed class AssetsFileParser
 
                 string packageName = parts[0];
                 string packageVersion = parts[1];
+                string? type = GetString(package.Value, "type");
+                bool isProject = string.Equals(type, "project", StringComparison.OrdinalIgnoreCase);
+                if (isProject) projectNames.Add(packageName);
 
                 if (package.Value?["dependencies"] is JsonObject deps)
                 {
+                    string label = isProject ? $"project {packageName}" : packageName;
                     foreach (var dep in deps)
                     {
                         if (!dependents.TryGetValue(dep.Key, out var set))
                             dependents[dep.Key] = set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                         set.Add(packageName);
+
+                        string? min = PackageVersion.LowerBound(GetString(dep.Value) ?? GetString(dep.Value, "version"));
+                        if (min is null) continue;
+                        if (!requirements.TryGetValue(dep.Key, out var reqs))
+                            requirements[dep.Key] = reqs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                        if (!reqs.TryGetValue(label, out var existing) || PackageVersion.Compare(min, existing) > 0)
+                            reqs[label] = min;
                     }
                 }
 
-                // Project references are recorded in the dependency graph (so transitive findings
-                // can name them) but are not analysed — only NuGet packages are.
-                string? type = package.Value?["type"]?.GetValue<string>();
-                if (type is not null && !type.Equals("package", StringComparison.OrdinalIgnoreCase))
-                {
-                    if (type.Equals("project", StringComparison.OrdinalIgnoreCase))
-                        projectNames.Add(packageName);
-                    continue;
-                }
+                // Project references are part of the graph but are not analysed — only NuGet packages are.
+                if (type is not null && !type.Equals("package", StringComparison.OrdinalIgnoreCase)) continue;
 
                 bool isDirect = directNames.Contains(packageName);
-                if (!isDirect && !includeTransitive) continue;
-
-                // Get DLLs from compile or runtime section
                 var dllKeys = GetDllKeys(package.Value);
-                if (dllKeys.Count == 0) continue;
+
+                // Transitive packages without assemblies can't be used from code — not needed.
+                if (!isDirect && dllKeys.Count == 0) continue;
 
                 if (!merged.TryGetValue(packageName, out var acc))
                     merged[packageName] = acc = new Accumulator(packageName, packageVersion, isDirect);
 
-                // Resolve library path
+                if (dllKeys.Count > 0) acc.HasAssemblies = true;
                 if (!libraryPaths.TryGetValue(package.Key, out string? libPath)) continue;
 
                 foreach (var dllKey in dllKeys)
@@ -148,29 +164,33 @@ internal sealed class AssetsFileParser
             }
         }
 
-        return merged.Values
+        var result = merged.Values
             .Select(acc => new PackageNamespaceInfo
             {
                 Name = acc.Name,
                 Version = acc.Version,
                 Namespaces = acc.Namespaces,
                 IsDirect = acc.IsDirect,
+                HasNoAssemblies = !acc.HasAssemblies,
+                PrivateAssetsAll = acc.IsDirect && privateAssetsAll.Contains(acc.Name),
                 IntroducedBy = acc.IsDirect ? [] : FindDirectAncestors(acc.Name, directNames, projectNames, dependents),
+                RequiredBy = requirements.TryGetValue(acc.Name, out var reqs)
+                    ? reqs.Select(r => new DependencyRequirement(r.Key, r.Value)).OrderBy(r => r.Dependent, StringComparer.OrdinalIgnoreCase).ToList()
+                    : [],
             })
             .ToList();
+
+        return new AssetsInfo { Packages = result, FrameworkReferences = frameworkReferences.ToList() };
     }
 
-    private static bool IsAutoReferenced(JsonNode? dependency)
+    private static string? GetString(JsonNode? node, string? property = null)
     {
-        try
-        {
-            return dependency?["autoReferenced"]?.GetValue<bool>() == true;
-        }
-        catch (InvalidOperationException)
-        {
-            return false;
-        }
+        var target = property is null ? node : node?[property];
+        return target is JsonValue v && v.TryGetValue(out string? s) ? s : null;
     }
+
+    private static bool GetBool(JsonNode? node, string property) =>
+        node?[property] is JsonValue v && v.TryGetValue(out bool b) && b;
 
     /// <summary>
     /// Walks the reverse dependency graph up to the direct package references (or project
@@ -217,7 +237,8 @@ internal sealed class AssetsFileParser
         {
             foreach (var item in obj)
             {
-                if (item.Key.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+                if (item.Key.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)
+                    && !item.Key.EndsWith("_._", StringComparison.Ordinal))
                     dlls.Add(item.Key);
             }
         }
@@ -225,7 +246,7 @@ internal sealed class AssetsFileParser
         return dlls;
     }
 
-    private static IReadOnlySet<string> ExtractNamespaces(string dllPath)
+    internal static IReadOnlySet<string> ExtractNamespaces(string dllPath)
     {
         if (!File.Exists(dllPath))
             return new HashSet<string>();
@@ -253,8 +274,10 @@ internal sealed class AssetsFileParser
                     namespaces.Add(ns);
             }
         }
-        catch (BadImageFormatException) { /* skip malformed DLLs */ }
+        catch (BadImageFormatException) { /* skip malformed or native DLLs */ }
+        catch (InvalidOperationException) { /* no metadata */ }
         catch (IOException) { /* skip inaccessible DLLs */ }
+        catch (UnauthorizedAccessException) { /* skip inaccessible DLLs */ }
 
         return namespaces;
     }
@@ -264,6 +287,7 @@ internal sealed class AssetsFileParser
         public string Name { get; } = name;
         public string Version { get; } = version;
         public bool IsDirect { get; } = isDirect;
+        public bool HasAssemblies { get; set; }
         public HashSet<string> Namespaces { get; } = new(StringComparer.Ordinal);
     }
 }

@@ -17,6 +17,7 @@ internal sealed class FixCommand : Command
         Options.Add(DryRunOption);
         Options.Add(SharedOptions.IncludeTransitiveOption);
         Options.Add(SharedOptions.IgnoreOption);
+        Options.Add(SharedOptions.NoDefaultIgnoresOption);
 
         this.SetAction(async (ParseResult parseResult, CancellationToken ct) =>
         {
@@ -24,6 +25,7 @@ internal sealed class FixCommand : Command
             bool dryRun = parseResult.GetValue(DryRunOption);
             bool includeTransitive = parseResult.GetValue(SharedOptions.IncludeTransitiveOption);
             string[] inlineIgnore = parseResult.GetValue(SharedOptions.IgnoreOption) ?? [];
+            bool useDefaultIgnores = !parseResult.GetValue(SharedOptions.NoDefaultIgnoresOption);
 
             IReadOnlyList<string> projects;
             try
@@ -56,6 +58,7 @@ internal sealed class FixCommand : Command
                         ProjectPath = projectPath,
                         IncludeTransitive = includeTransitive,
                         InlineIgnoredPackages = inlineIgnore.Length > 0 ? inlineIgnore : null,
+                        UseDefaultIgnores = useDefaultIgnores,
                         CancellationToken = ct,
                     }).ConfigureAwait(false), null);
                 }
@@ -86,6 +89,12 @@ internal sealed class FixCommand : Command
 
                 string fileName = Path.GetFileName(result.ProjectPath);
                 Console.WriteLine($"\nScanning {fileName} ...");
+
+                // Explain what is deliberately left alone, so nothing disappears silently
+                foreach (var pin in result.PinnedPackages)
+                    Console.WriteLine($"  Kept {pin.Name} {pin.Version}: version pin over {pin.TransitiveVersion} ({string.Join(", ", pin.RequiredBy)}).");
+                if (result.SkippedPackages.Count > 0)
+                    Console.WriteLine($"  Kept {result.SkippedPackages.Count} package(s) on the default safe list: {string.Join(", ", result.SkippedPackages.Select(p => p.Name))}.");
 
                 if (!result.HasUnused)
                 {

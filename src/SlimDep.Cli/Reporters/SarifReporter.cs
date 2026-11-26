@@ -14,6 +14,7 @@ internal sealed class SarifReporter : IReporter
     private const string SarifSchema = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json";
     private const string SarifVersion = "2.1.0";
     private const string RuleId = "SLIMDEP001";
+    private const string UndeclaredRuleId = "SLIMDEP002";
     private const string ToolName = "SlimDep";
     private const string ToolUri = "https://www.nuget.org/packages/SlimDep";
 
@@ -65,7 +66,7 @@ internal sealed class SarifReporter : IReporter
     {
         return new JsonObject
         {
-            ["tool"] = BuildTool(),
+            ["tool"] = BuildTool(includeUndeclaredRule: results.Any(r => r.HasUndeclared)),
             ["results"] = BuildResults(results),
             ["artifacts"] = BuildArtifacts(results),
         };
@@ -73,7 +74,7 @@ internal sealed class SarifReporter : IReporter
 
     // ── Tool descriptor ───────────────────────────────────────────────────────
 
-    private static JsonObject BuildTool()
+    private static JsonObject BuildTool(bool includeUndeclaredRule)
     {
         var rule = new JsonObject
         {
@@ -93,6 +94,30 @@ internal sealed class SarifReporter : IReporter
             ["defaultConfiguration"] = new JsonObject { ["level"] = "warning" },
         };
 
+        var rules = new JsonArray(rule);
+
+        // Only described when used, so existing SARIF consumers see an unchanged rule list
+        if (includeUndeclaredRule)
+        {
+            rules.Add(new JsonObject
+            {
+                ["id"] = UndeclaredRuleId,
+                ["name"] = "UndeclaredTransitivePackage",
+                ["shortDescription"] = new JsonObject
+                {
+                    ["text"] = "Transitive package used directly without a <PackageReference>.",
+                },
+                ["fullDescription"] = new JsonObject
+                {
+                    ["text"] = "The code uses namespaces from a package that is only referenced transitively. "
+                             + "If the package that brings it in is upgraded or removed, it can disappear and break the build. "
+                             + "Add an explicit <PackageReference>.",
+                },
+                ["helpUri"] = ToolUri,
+                ["defaultConfiguration"] = new JsonObject { ["level"] = "note" },
+            });
+        }
+
         return new JsonObject
         {
             ["driver"] = new JsonObject
@@ -100,7 +125,7 @@ internal sealed class SarifReporter : IReporter
                 ["name"] = ToolName,
                 ["version"] = ToolVersion,
                 ["informationUri"] = ToolUri,
-                ["rules"] = new JsonArray(rule),
+                ["rules"] = rules,
             },
         };
     }
@@ -139,6 +164,23 @@ internal sealed class SarifReporter : IReporter
                     ["locations"] = new JsonArray(new JsonObject
                     {
                         ["physicalLocation"] = physicalLocation,
+                    }),
+                });
+            }
+
+            foreach (var pkg in scanResult.UndeclaredPackages)
+            {
+                arr.Add(new JsonObject
+                {
+                    ["ruleId"] = UndeclaredRuleId,
+                    ["level"] = "note",
+                    ["message"] = new JsonObject { ["text"] = $"Undeclared dependency: {pkg.Name} {pkg.Version}. {pkg.Reason}" },
+                    ["locations"] = new JsonArray(new JsonObject
+                    {
+                        ["physicalLocation"] = new JsonObject
+                        {
+                            ["artifactLocation"] = new JsonObject { ["uri"] = ToFileUri(scanResult.ProjectPath) },
+                        },
                     }),
                 });
             }

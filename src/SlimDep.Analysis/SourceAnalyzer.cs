@@ -5,6 +5,78 @@ using System.Text.RegularExpressions;
 namespace SlimDep.Analysis;
 
 /// <summary>
+/// The namespaces a project references, in two views.
+/// </summary>
+/// <remarks>
+/// <see cref="All"/> is used for unused-package detection and is deliberately generous: every
+/// parent of an imported namespace is included (<c>using A.B.C</c> also adds <c>A.B</c> and <c>A</c>).
+/// <see cref="Explicit"/> is used for SLIMDEP002 and holds only names the code really refers to:
+/// imported namespaces themselves, and every prefix of a qualified name (<c>Foo.Bar.Type</c> →
+/// <c>Foo.Bar.Type</c>, <c>Foo.Bar</c>, <c>Foo</c>), since any of those could be the namespace.
+/// </remarks>
+internal sealed class NamespaceSet
+{
+    public HashSet<string> All { get; } = new(StringComparer.Ordinal);
+    public HashSet<string> Explicit { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// A namespace imported as a whole (using directive, @using, clr-namespace, &lt;Using&gt;).
+    /// Pass <paramref name="isExplicit"/> = <c>false</c> for imports the SDK adds regardless of
+    /// whether the code needs them (implicit usings), so they don't count as direct use.
+    /// </summary>
+    public void AddImport(string ns, bool isExplicit = true)
+    {
+        ns = Normalize(ns);
+        if (ns.Length == 0) return;
+        if (isExplicit) Explicit.Add(ns);
+        AddWithParents(ns);
+    }
+
+    /// <summary>A dotted name whose namespace is one of its prefixes (Foo.Bar.Type, using static, aliases).</summary>
+    public void AddQualifiedName(string name)
+    {
+        name = Normalize(name);
+        if (name.Length == 0) return;
+        AddWithParents(name);
+
+        Explicit.Add(name);
+        int lastDot = name.LastIndexOf('.');
+        while (lastDot > 0)
+        {
+            name = name[..lastDot];
+            Explicit.Add(name);
+            lastDot = name.LastIndexOf('.');
+        }
+    }
+
+    public void UnionWith(NamespaceSet other)
+    {
+        All.UnionWith(other.All);
+        Explicit.UnionWith(other.Explicit);
+    }
+
+    private void AddWithParents(string ns)
+    {
+        All.Add(ns);
+        int lastDot = ns.LastIndexOf('.');
+        while (lastDot > 0)
+        {
+            string parent = ns[..lastDot];
+            if (!All.Add(parent)) break; // already there, no need to climb further
+            lastDot = parent.LastIndexOf('.');
+        }
+    }
+
+    private static string Normalize(string ns)
+    {
+        ns = ns.Trim();
+        if (ns.StartsWith("global::", StringComparison.Ordinal))
+            ns = ns["global::".Length..];
+        return ns;
+    }
+}
+
+/// <summary>
 /// Parses <c>.cs</c>, <c>.xaml</c>, and <c>.razor</c>/<c>.cshtml</c> source files and
 /// collects all namespaces referenced via using directives, fully-qualified names,
 /// XAML clr-namespace declarations, and Razor @using directives.
@@ -16,12 +88,16 @@ internal static class SourceAnalyzer
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     /// <summary>
-    /// Returns the set of all namespace strings referenced across all source files
-    /// under <paramref name="projectDirectory"/>.
+    /// Returns the set of all namespace strings (including parent namespaces) referenced across
+    /// all source files under <paramref name="projectDirectory"/>.
     /// </summary>
-    internal static HashSet<string> CollectUsedNamespaces(string projectDirectory, CancellationToken ct)
+    internal static HashSet<string> CollectUsedNamespaces(string projectDirectory, CancellationToken ct) =>
+        Collect(projectDirectory, ct).All;
+
+    /// <summary>Collects referenced namespaces in both the generous and the explicit view.</summary>
+    internal static NamespaceSet Collect(string projectDirectory, CancellationToken ct)
     {
-        var usedNamespaces = new HashSet<string>(StringComparer.Ordinal);
+        var result = new NamespaceSet();
         var parseOptions = new CSharpParseOptions(LanguageVersion.Preview);
 
         // C# source files — using directives + fully-qualified names
@@ -33,8 +109,8 @@ internal static class SourceAnalyzer
                 string source = File.ReadAllText(csFile);
                 var tree = CSharpSyntaxTree.ParseText(source, parseOptions);
                 var root = tree.GetRoot(ct);
-                CollectUsingDirectives(root, usedNamespaces);
-                CollectFullyQualifiedNames(root, usedNamespaces);
+                CollectUsingDirectives(root, result);
+                CollectFullyQualifiedNames(root, result);
 
                 // Code inside #if blocks (e.g. #if NET48 in multi-targeted projects) is parsed
                 // as disabled text when no symbols are defined. Re-parse with every symbol the
@@ -45,25 +121,25 @@ internal static class SourceAnalyzer
                     var altRoot = CSharpSyntaxTree
                         .ParseText(source, parseOptions.WithPreprocessorSymbols(symbols))
                         .GetRoot(ct);
-                    CollectUsingDirectives(altRoot, usedNamespaces);
-                    CollectFullyQualifiedNames(altRoot, usedNamespaces);
+                    CollectUsingDirectives(altRoot, result);
+                    CollectFullyQualifiedNames(altRoot, result);
                 }
             }
             catch (IOException) { /* skip unreadable files */ }
         }
 
         // XAML files — xmlns clr-namespace declarations (WPF, MAUI, etc.)
-        CollectXamlNamespaces(projectDirectory, usedNamespaces, ct);
+        CollectXamlNamespaces(projectDirectory, result, ct);
 
         // Razor / CSHTML files — @using directives (Blazor, MVC, etc.)
-        CollectRazorNamespaces(projectDirectory, usedNamespaces, ct);
+        CollectRazorNamespaces(projectDirectory, result, ct);
 
-        return usedNamespaces;
+        return result;
     }
 
-    // ── Feature 1: Fully-qualified name detection ────────────────────────────
+    // ── Fully-qualified name detection ────────────────────────────────────────
 
-    private static void CollectFullyQualifiedNames(Microsoft.CodeAnalysis.SyntaxNode root, HashSet<string> result)
+    private static void CollectFullyQualifiedNames(Microsoft.CodeAnalysis.SyntaxNode root, NamespaceSet result)
     {
         foreach (var node in root.DescendantNodes())
         {
@@ -71,11 +147,14 @@ internal static class SourceAnalyzer
             //   Foo.Bar.Type x;  typeof(Foo.Bar.Type);  [Foo.Attr];  : Foo.IFace
             if (node is QualifiedNameSyntax { Parent: not QualifiedNameSyntax } qualName)
             {
+                // Using directives are handled separately (an imported namespace is not a qualified type name)
+                if (qualName.Parent is UsingDirectiveSyntax) continue;
+
                 string name = qualName.ToString();
                 // Strip generic arguments: "Foo.Bar<T>" → "Foo.Bar"
                 int genericIdx = name.IndexOf('<');
                 if (genericIdx > 0) name = name[..genericIdx];
-                AddNamespace(name, result); // also strips global::
+                result.AddQualifiedName(name);
             }
             // MemberAccessExpressionSyntax covers expression positions:
             //   Foo.Bar.Method();  Foo.Bar.StaticProp
@@ -84,10 +163,7 @@ internal static class SourceAnalyzer
                 string? chain = BuildIdentifierChain(memberAccess);
                 // Only consider chains starting with uppercase (namespace/type naming convention)
                 if (chain is not null && chain.Length > 0 && char.IsUpper(chain[0]))
-                {
-                    result.Add(chain);
-                    AddParentNamespaces(chain, result);
-                }
+                    result.AddQualifiedName(chain);
             }
         }
     }
@@ -111,9 +187,9 @@ internal static class SourceAnalyzer
         return parts.Count > 1 ? string.Join(".", parts) : null;
     }
 
-    // ── Feature 4a: XAML namespace collection ────────────────────────────────
+    // ── XAML namespace collection ─────────────────────────────────────────────
 
-    private static void CollectXamlNamespaces(string projectDirectory, HashSet<string> result, CancellationToken ct)
+    private static void CollectXamlNamespaces(string projectDirectory, NamespaceSet result, CancellationToken ct)
     {
         foreach (var file in EnumerateFiles(projectDirectory, "*.xaml"))
         {
@@ -122,22 +198,15 @@ internal static class SourceAnalyzer
             {
                 string content = File.ReadAllText(file);
                 foreach (Match match in XamlClrNsRegex.Matches(content))
-                {
-                    string ns = match.Groups[1].Value.Trim();
-                    if (!string.IsNullOrEmpty(ns))
-                    {
-                        result.Add(ns);
-                        AddParentNamespaces(ns, result);
-                    }
-                }
+                    result.AddImport(match.Groups[1].Value);
             }
             catch (IOException) { }
         }
     }
 
-    // ── Feature 4b: Razor / CSHTML namespace collection ──────────────────────
+    // ── Razor / CSHTML namespace collection ───────────────────────────────────
 
-    private static void CollectRazorNamespaces(string projectDirectory, HashSet<string> result, CancellationToken ct)
+    private static void CollectRazorNamespaces(string projectDirectory, NamespaceSet result, CancellationToken ct)
     {
         foreach (string pattern in new[] { "*.razor", "*.cshtml" })
         {
@@ -152,12 +221,7 @@ internal static class SourceAnalyzer
                         if (!trimmed.StartsWith("@using ", StringComparison.Ordinal))
                             continue;
 
-                        string ns = trimmed["@using ".Length..].Trim().TrimEnd(';');
-                        if (!string.IsNullOrEmpty(ns))
-                        {
-                            result.Add(ns);
-                            AddParentNamespaces(ns, result);
-                        }
+                        result.AddImport(trimmed["@using ".Length..].Trim().TrimEnd(';'));
                     }
                 }
                 catch (IOException) { }
@@ -169,14 +233,19 @@ internal static class SourceAnalyzer
 
     /// <summary>
     /// Parses a single C# file (e.g. a generated <c>GlobalUsings.g.cs</c>) and adds its
-    /// using directives to <paramref name="result"/>.
+    /// using directives to <paramref name="result"/>. Generated files mix SDK implicit usings
+    /// with user ones, so they are added as non-explicit imports.
     /// </summary>
-    internal static void CollectUsingsFromFile(string filePath, HashSet<string> result, CancellationToken ct)
+    internal static void CollectUsingsFromFile(string filePath, NamespaceSet result, CancellationToken ct)
     {
         try
         {
             var tree = CSharpSyntaxTree.ParseText(File.ReadAllText(filePath), new CSharpParseOptions(LanguageVersion.Preview));
-            CollectUsingDirectives(tree.GetRoot(ct), result);
+            foreach (var u in tree.GetRoot(ct).DescendantNodes().OfType<UsingDirectiveSyntax>())
+            {
+                if (u.Name is not null)
+                    result.AddImport(u.Name.ToString(), isExplicit: false);
+            }
         }
         catch (IOException) { /* skip unreadable files */ }
     }
@@ -200,39 +269,18 @@ internal static class SourceAnalyzer
         return symbols.ToList();
     }
 
-    private static void CollectUsingDirectives(Microsoft.CodeAnalysis.SyntaxNode root, HashSet<string> result)
+    private static void CollectUsingDirectives(Microsoft.CodeAnalysis.SyntaxNode root, NamespaceSet result)
     {
         foreach (var node in root.DescendantNodes())
         {
-            if (node is UsingDirectiveSyntax usingDirective && usingDirective.Name is not null)
-                AddNamespace(usingDirective.Name.ToString(), result);
-        }
-    }
+            if (node is not UsingDirectiveSyntax { Name: not null } usingDirective) continue;
 
-    /// <summary>
-    /// Adds <paramref name="ns"/> and all its parent namespaces to <paramref name="result"/>,
-    /// stripping any <c>global::</c> alias qualifier first.
-    /// </summary>
-    internal static void AddNamespace(string ns, HashSet<string> result)
-    {
-        ns = ns.Trim();
-        if (ns.StartsWith("global::", StringComparison.Ordinal))
-            ns = ns["global::".Length..];
-
-        if (string.IsNullOrEmpty(ns)) return;
-
-        result.Add(ns);
-        AddParentNamespaces(ns, result);
-    }
-
-    private static void AddParentNamespaces(string fullNamespace, HashSet<string> result)
-    {
-        int lastDot = fullNamespace.LastIndexOf('.');
-        while (lastDot > 0)
-        {
-            string parent = fullNamespace[..lastDot];
-            if (!result.Add(parent)) break; // already there, no need to climb further
-            lastDot = parent.LastIndexOf('.');
+            string name = usingDirective.Name.ToString();
+            // 'using static Foo.Bar.Type;' and 'using X = Foo.Bar.Type;' name a type, not a namespace
+            if (usingDirective.StaticKeyword != default || usingDirective.Alias is not null)
+                result.AddQualifiedName(name);
+            else
+                result.AddImport(name);
         }
     }
 

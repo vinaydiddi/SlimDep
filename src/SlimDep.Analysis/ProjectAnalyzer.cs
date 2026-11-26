@@ -5,7 +5,7 @@ using System.Xml.Linq;
 namespace SlimDep.Analysis;
 
 /// <summary>
-/// Orchestrates the full unused-package analysis for a single .NET project.
+/// Orchestrates the full package analysis for a single .NET project.
 /// </summary>
 public sealed class ProjectAnalyzer : IProjectAnalyzer
 {
@@ -22,22 +22,21 @@ public sealed class ProjectAnalyzer : IProjectAnalyzer
             ?? throw new SlimDepException($"Cannot determine directory for '{projectPath}'");
 
         string assetsFile = Path.Combine(projectDir, "obj", "project.assets.json");
+        var ct = options.CancellationToken;
 
         var sw = Stopwatch.StartNew();
 
-        // 1. Parse project.assets.json → list of (package, version, namespaces)
-        IReadOnlyList<PackageNamespaceInfo> packageInfos = await Task.Run(
-            () => AssetsFileParser.Parse(assetsFile, options.IncludeTransitive),
-            options.CancellationToken).ConfigureAwait(false);
+        // 1. Parse project.assets.json → packages, namespaces and the dependency graph
+        AssetsInfo assets = await Task.Run(() => AssetsFileParser.Parse(assetsFile), ct).ConfigureAwait(false);
 
-        // 2. Collect all used namespaces from .cs, .xaml, and .razor source files,
-        //    plus global usings declared in MSBuild (ImplicitUsings / <Using> items)
-        HashSet<string> usedNamespaces = await Task.Run(() =>
+        // 2. Collect namespaces referenced from .cs, .xaml and .razor files, plus global usings
+        //    declared in MSBuild (ImplicitUsings / <Using> items / generated GlobalUsings.g.cs)
+        NamespaceSet used = await Task.Run(() =>
         {
-            var ns = SourceAnalyzer.CollectUsedNamespaces(projectDir, options.CancellationToken);
-            ns.UnionWith(ProjectUsingsResolver.Resolve(projectPath, options.CancellationToken));
+            var ns = SourceAnalyzer.Collect(projectDir, ct);
+            ProjectUsingsResolver.ResolveInto(projectPath, ns, ct);
             return ns;
-        }, options.CancellationToken).ConfigureAwait(false);
+        }, ct).ConfigureAwait(false);
 
         // 3. Load .slimdepignore (walk up from project directory to solution root)
         //    and merge with any inline --ignore values passed via CLI
@@ -50,48 +49,66 @@ public sealed class ProjectAnalyzer : IProjectAnalyzer
         // 4. Detect CPM GlobalPackageReferences (applied globally, cannot be removed per-project)
         IReadOnlySet<string> globalPackageRefs = GetGlobalPackageReferences(projectDir);
 
-        // 5. Cross-reference: which packages have no namespace overlap with used namespaces?
+        var byName = assets.Packages.ToDictionary(p => p.Name, StringComparer.OrdinalIgnoreCase);
         var unused = new List<UnusedPackage>();
+        var pinned = new List<PinnedPackage>();
+        var skipped = new List<SkippedPackage>();
+        var undeclaredCandidates = new List<PackageNamespaceInfo>();
 
-        foreach (var pkg in packageInfos)
+        // 5. Classify every package
+        foreach (var pkg in assets.Packages)
         {
-            options.CancellationToken.ThrowIfCancellationRequested();
+            ct.ThrowIfCancellationRequested();
 
             if (pkg.Namespaces.Count == 0)
-                continue; // build tool / source generator / contentFiles-only — skip
+                continue; // metapackage / build tool / source generator — nothing to match
 
-            // Skip packages explicitly ignored via .slimdepignore or --ignore flag
-            if (allIgnored.Contains(pkg.Name))
+            if (allIgnored.Contains(pkg.Name) || globalPackageRefs.Contains(pkg.Name))
                 continue;
 
-            // Skip packages applied globally via CPM GlobalPackageReference
-            if (globalPackageRefs.Contains(pkg.Name))
-                continue;
+            bool isUsed = pkg.Namespaces.Any(used.All.Contains);
 
-            bool hasMatch = pkg.Namespaces.Any(ns => usedNamespaces.Contains(ns));
-            if (hasMatch)
-                continue;
-
-            if (pkg.IsDirect)
+            if (!pkg.IsDirect)
             {
-                unused.Add(new UnusedPackage(pkg.Name, pkg.Version, DirectReason));
+                if (isUsed)
+                    undeclaredCandidates.Add(pkg);
+                else if (options.IncludeTransitive)
+                    unused.Add(TransitiveUnused(pkg));
+                continue;
             }
-            else
+
+            if (isUsed)
+                continue;
+
+            // Looks unused. Before reporting it, apply the built-in safe list...
+            if (options.UseDefaultIgnores)
             {
-                string via = pkg.IntroducedBy.Count > 0
-                    ? $" (pulled in by {string.Join(", ", pkg.IntroducedBy)})"
-                    : string.Empty;
-                unused.Add(new UnusedPackage(
-                    pkg.Name,
-                    pkg.Version,
-                    $"Transitive dependency{via}; no namespace from it is used directly")
+                if (DefaultIgnoreList.Match(pkg.Name) is string pattern)
                 {
-                    IsTransitive = true,
-                });
+                    skipped.Add(new SkippedPackage(pkg.Name, pkg.Version, $"On the built-in safe list ({pattern})"));
+                    continue;
+                }
+                if (pkg.PrivateAssetsAll)
+                {
+                    skipped.Add(new SkippedPackage(pkg.Name, pkg.Version, "Marked PrivateAssets=\"all\" (development-only dependency)"));
+                    continue;
+                }
             }
+
+            // ...and keep references that exist to raise the version of a transitive dependency.
+            if (FindPin(pkg) is PinnedPackage pin)
+            {
+                pinned.Add(pin);
+                continue;
+            }
+
+            unused.Add(new UnusedPackage(pkg.Name, pkg.Version, DirectReason));
         }
 
-        // 6. Enrich unused direct packages with line numbers from the .csproj XML
+        // 6. SLIMDEP002: transitive packages the code uses directly
+        var undeclared = FindUndeclared(undeclaredCandidates, assets, byName, used);
+
+        // 7. Enrich unused direct packages with line numbers from the .csproj XML
         var unusedNames = new HashSet<string>(
             unused.Where(p => !p.IsTransitive).Select(p => p.Name),
             StringComparer.OrdinalIgnoreCase);
@@ -108,9 +125,95 @@ public sealed class ProjectAnalyzer : IProjectAnalyzer
         {
             ProjectPath = projectPath,
             UnusedPackages = unusedWithLines,
-            TotalDirectPackages = packageInfos.Count(p => p.IsDirect),
+            UndeclaredPackages = undeclared,
+            PinnedPackages = pinned.OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase).ToList(),
+            SkippedPackages = skipped.OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase).ToList(),
+            TotalDirectPackages = assets.Packages.Count(p => p.IsDirect && !p.HasNoAssemblies),
             Duration = sw.Elapsed,
         };
+    }
+
+    private static UnusedPackage TransitiveUnused(PackageNamespaceInfo pkg)
+    {
+        string via = pkg.IntroducedBy.Count > 0
+            ? $" (pulled in by {string.Join(", ", pkg.IntroducedBy)})"
+            : string.Empty;
+        return new UnusedPackage(pkg.Name, pkg.Version, $"Transitive dependency{via}; no namespace from it is used directly")
+        {
+            IsTransitive = true,
+        };
+    }
+
+    /// <summary>
+    /// A direct reference is a version pin when other packages in the graph depend on it, but
+    /// all of them ask for a lower version. Without the direct reference NuGet would resolve the
+    /// highest of those lower bounds, i.e. a downgrade — often re-introducing a vulnerable version.
+    /// </summary>
+    internal static PinnedPackage? FindPin(PackageNamespaceInfo pkg)
+    {
+        var reqs = pkg.RequiredBy
+            .Where(r => !r.Dependent.Equals(pkg.Name, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (reqs.Count == 0) return null;
+
+        string fallback = reqs
+            .Select(r => r.MinVersion)
+            .Aggregate((a, b) => PackageVersion.Compare(a, b) >= 0 ? a : b);
+
+        if (PackageVersion.Compare(fallback, pkg.Version) >= 0)
+            return null; // removing it would keep the same version — not a pin
+
+        return new PinnedPackage(pkg.Name, pkg.Version, fallback, reqs.Select(r => r.Dependent).ToList());
+    }
+
+    /// <summary>
+    /// Finds transitive packages whose namespaces the code references explicitly. To stay
+    /// precise, a namespace is ignored when it is also provided by a direct package or by the
+    /// shared framework, and a package is ignored when it only arrives through a project
+    /// reference or through a direct metapackage (e.g. <c>xunit</c> → <c>xunit.assert</c>), which
+    /// already acts as its declaration.
+    /// </summary>
+    private static IReadOnlyList<UndeclaredPackage> FindUndeclared(
+        List<PackageNamespaceInfo> candidates,
+        AssetsInfo assets,
+        Dictionary<string, PackageNamespaceInfo> byName,
+        NamespaceSet used)
+    {
+        if (candidates.Count == 0) return [];
+
+        var directNamespaces = new HashSet<string>(
+            assets.Packages.Where(p => p.IsDirect).SelectMany(p => p.Namespaces),
+            StringComparer.Ordinal);
+
+        HashSet<string>? frameworkNamespaces = null;
+        var result = new List<UndeclaredPackage>();
+
+        foreach (var pkg in candidates)
+        {
+            var packageIntroducers = pkg.IntroducedBy
+                .Where(i => !i.StartsWith("project ", StringComparison.Ordinal))
+                .ToList();
+
+            // Only via own projects: you control those, so the dependency can't vanish silently
+            if (packageIntroducers.Count == 0) continue;
+
+            // A direct metapackage is the declaration of what it brings in
+            if (packageIntroducers.Any(i => byName.TryGetValue(i, out var d) && d.HasNoAssemblies)) continue;
+
+            var usedNamespaces = pkg.Namespaces
+                .Where(ns => used.Explicit.Contains(ns) && !directNamespaces.Contains(ns))
+                .ToList();
+            if (usedNamespaces.Count == 0) continue;
+
+            frameworkNamespaces ??= FrameworkNamespaceProvider.GetNamespaces(assets.FrameworkReferences);
+            usedNamespaces.RemoveAll(frameworkNamespaces.Contains);
+            if (usedNamespaces.Count == 0) continue;
+
+            usedNamespaces.Sort(StringComparer.Ordinal);
+            result.Add(new UndeclaredPackage(pkg.Name, pkg.Version, packageIntroducers, usedNamespaces));
+        }
+
+        return result.OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase).ToList();
     }
 
     /// <summary>

@@ -13,6 +13,8 @@ internal sealed class ScanCommand : Command
         Options.Add(SharedOptions.OutputFileOption);
         Options.Add(SharedOptions.IncludeTransitiveOption);
         Options.Add(SharedOptions.IgnoreOption);
+        Options.Add(SharedOptions.NoDefaultIgnoresOption);
+        Options.Add(SharedOptions.FailOnUndeclaredOption);
 
         this.SetAction(async (ParseResult parseResult, CancellationToken ct) =>
         {
@@ -21,6 +23,8 @@ internal sealed class ScanCommand : Command
             string? outputFile = parseResult.GetValue(SharedOptions.OutputFileOption);
             bool includeTransitive = parseResult.GetValue(SharedOptions.IncludeTransitiveOption);
             string[] inlineIgnore = parseResult.GetValue(SharedOptions.IgnoreOption) ?? [];
+            bool useDefaultIgnores = !parseResult.GetValue(SharedOptions.NoDefaultIgnoresOption);
+            bool failOnUndeclared = parseResult.GetValue(SharedOptions.FailOnUndeclaredOption);
 
             bool toFile = !string.IsNullOrEmpty(outputFile);
             bool isConsoleFormat = format == "console";
@@ -61,6 +65,7 @@ internal sealed class ScanCommand : Command
                         ProjectPath = projectPath,
                         IncludeTransitive = includeTransitive,
                         InlineIgnoredPackages = inlineIgnore.Length > 0 ? inlineIgnore : null,
+                        UseDefaultIgnores = useDefaultIgnores,
                         CancellationToken = ct,
                     }).ConfigureAwait(false), null);
                 }
@@ -92,7 +97,8 @@ internal sealed class ScanCommand : Command
 
                 status.WriteLine($"Scanning {Path.GetFileName(result.ProjectPath)} ...");
 
-                if (result.HasUnused)
+                // SLIMDEP002 findings are informational unless --fail-on-undeclared is set
+                if (result.HasUnused || (failOnUndeclared && result.HasUndeclared))
                     anyUnused = true;
 
                 successResults.Add(result);

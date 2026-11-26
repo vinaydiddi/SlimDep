@@ -29,13 +29,21 @@
 
     <!-- Package identity -->
     <PackageId>SlimDep</PackageId>
-    <Version>1.1.1</Version>
+    <Version>1.2.0</Version>
     <PackageProjectUrl>https://www.nuget.org/packages/SlimDep</PackageProjectUrl>
     <Description>Detect and remove unused NuGet package references in .NET projects.</Description>
     <PackageTags>nuget;dotnet-tool;unused;dependencies;packages;csproj;analyzer;cleanup;remove;detect;roslyn;static-analysis;sarif;package-reference;unused-packages;dependency-cleanup;dotnet;tool;net8;slim;nuget-cleanup;unused-nuget;dependency-analyzer;github-code-scanning</PackageTags>
     <PackageIcon>icon.png</PackageIcon>
     <PackageReadmeFile>README.md</PackageReadmeFile>
-    <PackageReleaseNotes>v1.1.1 — Bug-fix release.
+    <PackageReleaseNotes>v1.2.0 — More trustworthy results.
+
+New features:
+- SLIMDEP002: flags transitive packages your code uses directly without a &lt;PackageReference&gt; (they can vanish when the package that brings them in changes). Ignores framework-provided namespaces, namespaces shared with direct packages, SDK implicit usings, project references and metapackages (e.g. xunit). Informational by default; --fail-on-undeclared makes it fail CI. Reported in console, JSON (undeclaredPackages) and SARIF (rule SLIMDEP002, level note).
+- Version-pin detection: a direct reference that raises the version of a transitive dependency (typically a security pin) is kept and listed as a pin instead of being reported unused, so fix no longer downgrades it.
+- Built-in safe list: test adapters, coverage collectors, SourceLink, versioning, design-time tools, analyzers, runtime-loaded providers and PrivateAssets="all" references are never reported as unused. Skipped packages are listed; --no-default-ignores disables the list.
+- JSON output gains undeclaredPackages, pinnedPackages and skippedPackages arrays.
+
+v1.1.1 — Bug-fix release.
 
 Fixes:
 - --include-transitive now works: unused transitive packages are reported (marked transitive, with the reference that brings them in); fix lists but never removes them

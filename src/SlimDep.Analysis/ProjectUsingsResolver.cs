@@ -48,10 +48,17 @@ internal static class ProjectUsingsResolver
 
     private static readonly string[] WindowsFormsUsings = ["System.Drawing", "System.Windows.Forms"];
 
-    /// <summary>Returns every namespace globally imported by the project's MSBuild files.</summary>
+    /// <summary>Returns every namespace (with parents) globally imported by the project's MSBuild files.</summary>
     internal static HashSet<string> Resolve(string projectPath, CancellationToken ct = default)
     {
-        var result = new HashSet<string>(StringComparer.Ordinal);
+        var set = new NamespaceSet();
+        ResolveInto(projectPath, set, ct);
+        return set.All;
+    }
+
+    /// <summary>Adds every namespace globally imported by the project's MSBuild files to <paramref name="result"/>.</summary>
+    internal static void ResolveInto(string projectPath, NamespaceSet result, CancellationToken ct = default)
+    {
         string projectDir = Path.GetDirectoryName(projectPath) ?? ".";
 
         // MSBuild imports the nearest Directory.Build.props before the project body and the
@@ -66,22 +73,26 @@ internal static class ProjectUsingsResolver
         string? implicitUsings = LastPropertyValue(files, "ImplicitUsings");
         bool useWindowsForms = string.Equals(LastPropertyValue(files, "UseWindowsForms"), "true", StringComparison.OrdinalIgnoreCase);
 
-        var namespaces = new List<string>();
+        // (namespace, explicit): SDK implicit usings are not explicit — they are imported whether
+        // or not the code needs them — while <Using> items are written by the user.
+        var namespaces = new List<(string Ns, bool Explicit)>();
 
         if (implicitUsings is not null
             && (implicitUsings.Equals("enable", StringComparison.OrdinalIgnoreCase)
                 || implicitUsings.Equals("true", StringComparison.OrdinalIgnoreCase)))
         {
-            namespaces.AddRange(BaseImplicitUsings);
+            var implicitList = new List<string>(BaseImplicitUsings);
             foreach (string sdkName in SplitList(sdk))
             {
                 // Sdk may carry a version: "Microsoft.NET.Sdk.Web/8.0.0"
                 string name = sdkName.Split('/')[0];
                 if (SdkImplicitUsings.TryGetValue(name, out var extra))
-                    namespaces.AddRange(extra);
+                    implicitList.AddRange(extra);
             }
             if (useWindowsForms)
-                namespaces.AddRange(WindowsFormsUsings);
+                implicitList.AddRange(WindowsFormsUsings);
+
+            namespaces.AddRange(implicitList.Select(ns => (ns, false)));
         }
 
         // <Using Include="..."/> and <Using Remove="..."/> items, in evaluation order.
@@ -90,14 +101,14 @@ internal static class ProjectUsingsResolver
             foreach (var item in doc.Descendants().Where(e => e.Name.LocalName == "Using"))
             {
                 foreach (string ns in SplitList(item.Attribute("Include")?.Value))
-                    namespaces.Add(ns);
+                    namespaces.Add((ns, true));
                 foreach (string ns in SplitList(item.Attribute("Remove")?.Value))
-                    namespaces.RemoveAll(n => n.Equals(ns, StringComparison.Ordinal));
+                    namespaces.RemoveAll(n => n.Ns.Equals(ns, StringComparison.Ordinal));
             }
         }
 
-        foreach (string ns in namespaces)
-            SourceAnalyzer.AddNamespace(ns, result);
+        foreach (var (ns, isExplicit) in namespaces)
+            result.AddImport(ns, isExplicit);
 
         // If the project has been built, the generated GlobalUsings file is authoritative.
         string objDir = Path.Combine(projectDir, "obj");
@@ -109,8 +120,6 @@ internal static class ProjectUsingsResolver
                 SourceAnalyzer.CollectUsingsFromFile(generated, result, ct);
             }
         }
-
-        return result;
     }
 
     private static string? LastPropertyValue(List<XDocument> files, string propertyName)
