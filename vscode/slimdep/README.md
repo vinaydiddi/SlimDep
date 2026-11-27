@@ -22,7 +22,7 @@ dotnet tool install --global SlimDep     # 1.2.1 or later recommended
 |---|---|---|
 | **SlimDep: Scan for Unused Packages** (`slimdep.scan`) | Command Palette | Runs `slimdep scan <project> --format json` for every `.csproj` in the workspace (excluding `obj/`). Shows progress in the status bar and fills the tree view. |
 | **SlimDep: Refresh** (`slimdep.refresh`) | Panel title bar ↻, Command Palette | Same as Scan. |
-| **SlimDep: Remove All Unused Packages** (`slimdep.fix`) | Panel title bar 🗑, CodeLens, Command Palette | Asks for confirmation, runs `slimdep fix` for each project with removable findings, then re-scans. |
+| **SlimDep: Remove All Unused Packages** (`slimdep.fix`) | Panel title bar 🗑, CodeLens, Command Palette | Asks for confirmation, runs `slimdep fix` for each project with removable findings, then drops the removed packages from the tree. Run `dotnet restore` before scanning again. |
 | **SlimDep: Ignore this package** (`slimdep.ignorePackage`) | Inline 🔇 on a package in the tree | Runs `slimdep ignore add`, then re-scans. |
 
 What the tree shows:
@@ -37,6 +37,7 @@ UNUSED NUGET PACKAGES
 How each feature behaves:
 - **Tree items:** hover a package to see why it was reported.
 - **Transitive packages:** only shown with `slimdep.includeTransitive`. They're marked ⓘ, are informational, and are never offered for removal. They stay in the tree after Remove, because the CLI can't remove them from the project file.
+- **After Remove:** run `dotnet restore` before the next scan. Until then, `project.assets.json` still lists the removed references, and a scan would report them again.
 - **CodeLens:** `⚠ Unused — run slimdep fix to remove` appears above removable packages, and only in the `.csproj` they belong to. Clicking it opens the same confirmation as **Remove All Unused Packages**.
 - **Ignore:** the package is added to the `.slimdepignore` SlimDep actually reads for that project: the nearest one found by searching upward from the project. If there isn't one, it's created in the project's workspace folder, which handles multi-root workspaces correctly.
 - **Errors:**
