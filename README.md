@@ -1,454 +1,166 @@
-﻿# SlimDep
+# SlimDep
 
 [![NuGet](https://img.shields.io/nuget/v/SlimDep.svg)](https://nuget.org/packages/SlimDep)
 [![NuGet Downloads](https://img.shields.io/nuget/dt/SlimDep.svg)](https://nuget.org/packages/SlimDep)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/vinaydiddi/SlimDep/blob/main/LICENSE)
 
-**SlimDep** is a .NET global tool (`v1.2.0`) that detects and removes unused NuGet package references from `.csproj` files.
+A .NET global tool that finds and removes unused NuGet package references in `.csproj` files. It also reports transitive packages your code uses without referencing them. It never removes version pins or packages that work without code references.
 
-Over time, .NET projects accumulate dead package references — packages added during development or experimentation that are never cleaned up. SlimDep finds them automatically and can remove them in one command.
+- Needs a **restore**, not a build. Runs on **.NET 8, 9 and 10**.
+- `fix` edits project files **byte-for-byte**: only the removed elements change.
+- CI-ready: exit codes, JSON, and SARIF for GitHub Code Scanning and Azure DevOps.
 
-> Supports **.NET 8, 9, and 10**.
+**More:** [Usage guide & full output samples](https://github.com/vinaydiddi/SlimDep/blob/main/USAGE.md) · [Changelog](https://github.com/vinaydiddi/SlimDep/blob/main/CHANGELOG.md) · [VS Code extension](https://github.com/vinaydiddi/SlimDep/tree/main/vscode/slimdep)
 
----
-
-## Installation
-
-```bash
-dotnet tool install --global SlimDep
-```
-
-Once installed, the `slimdep` command is available everywhere on your machine.
+## Install & quick start
 
 ```bash
-dotnet tool update --global SlimDep    # update
-dotnet tool uninstall --global SlimDep # uninstall
+dotnet tool install --global SlimDep     # update: dotnet tool update -g SlimDep · remove: dotnet tool uninstall -g SlimDep
+
+dotnet restore                           # SlimDep reads the restore output (project.assets.json)
+slimdep scan .                           # report
+slimdep fix . --dry-run                  # preview removals
+slimdep fix .                            # remove, then run 'dotnet restore' again
 ```
-
----
-
-## Before You Scan
-
-Your project must be restored so `obj/project.assets.json` exists:
-
-```bash
-dotnet restore
-```
-
-> SlimDep does not require a build — only a restore.
-
----
 
 ## Commands
 
-### `slimdep --version`
+`<project>` is a `.csproj` file or a folder. A folder is searched recursively for `.csproj` files; `obj/` and inaccessible folders are skipped.
 
-```bash
-slimdep --version
-# output: 1.2.0
-```
-
----
-
-### `slimdep scan` — Detect unused packages
-
-```bash
-slimdep scan <project> [options]
-```
-
-**Argument**
-
-| Argument | Description |
+| Command | Purpose |
 |---|---|
-| `<project>` | Path to a `.csproj` file **or** a folder (all `.csproj` files found recursively, `obj/` excluded) |
+| `slimdep scan <project>` | Report findings. Projects are scanned in parallel (up to one per CPU core). |
+| `slimdep fix <project>` | Remove unused direct references (SLIMDEP001) from the project files. |
+| `slimdep ignore add <pkg> [--path <dir>]` | Add a package to `<dir>/.slimdepignore` (default: current directory). Creates the file if needed. |
+| `slimdep ignore remove <pkg> [--path <dir>]` | Remove a package from `<dir>/.slimdepignore`. |
+| `slimdep ignore list [--path <dir>]` | Show the `.slimdepignore` SlimDep would use, searching upward from `<dir>`. |
+| `slimdep --version` · `slimdep <command> --help` | Version and help. |
 
-**Options**
+| Option | `scan` | `fix` | Description |
+|---|:-:|:-:|---|
+| `--format console\|json\|sarif` | ✓ | | Output format (default `console`). Other values are rejected. |
+| `--output <file>` | ✓ | | Write the report to a file instead of stdout. |
+| `--dry-run` | | ✓ | Show what would be removed; write nothing. |
+| `--include-transitive` | ✓ | ✓ | Also list unused **transitive** packages (informational; never removed). |
+| `--ignore <pkg>` | ✓ | ✓ | Suppress a package (repeatable). Combined with `.slimdepignore`. |
+| `--no-default-ignores` | ✓ | ✓ | Turn off the [built-in safe list](#built-in-safe-list) and the `PrivateAssets="all"` exemption. |
+| `--fail-on-undeclared` | ✓ | | Make SLIMDEP002 findings fail the scan (exit `1`). |
 
-| Option | Default | Description |
+**Exit codes**
+
+| Code | `scan` | `fix` |
 |---|---|---|
-| `--format` | `console` | Output format: `console`, `json`, or `sarif` |
-| `--output <file>` | _(stdout)_ | Write report to a file instead of printing |
-| `--include-transitive` | off | Also report transitive (indirect) packages whose namespaces are never used directly |
-| `--ignore <pkg>` | _(none)_ | Suppress a package from analysis (repeatable) |
-| `--no-default-ignores` | off | Also report packages on the [built-in safe list](#built-in-safe-list) and `PrivateAssets="all"` references |
-| `--fail-on-undeclared` | off | Exit with `1` when [SLIMDEP002](#slimdep002--transitive-packages-used-directly) findings exist |
-| `-?, -h, --help` | | Show help |
+| `0` | Nothing to remove. Informational findings (transitive, SLIMDEP002, pins, skips) don't fail the scan. | Success, including `--dry-run`. |
+| `1` | Unused direct references found, or SLIMDEP002 findings with `--fail-on-undeclared`. | — |
+| `2` | A project couldn't be analysed, e.g. not restored or an unreadable assets file. The other projects are still reported. | A project couldn't be analysed or written. |
 
-> **Transitive findings** are informational. They show which direct package or project reference brings each one in, but they can't be removed from your project file. `fix` lists them and leaves them alone. Most transitive packages are used only by the package that depends on them, so expect a long list.
-
-**Examples:**
-```bash
-# Scan a single project
-slimdep scan MyApp.csproj
-
-# Scan an entire solution folder (all .csproj files found recursively)
-slimdep scan C:\Dev\MySolution
-
-# JSON output saved to a file
-slimdep scan MyApp.csproj --format json --output report.json
-
-# SARIF output — consumed by GitHub Code Scanning and Azure DevOps
-slimdep scan MyApp.csproj --format sarif --output results.sarif
-
-# Include transitive dependencies
-slimdep scan MyApp.csproj --include-transitive
-```
-
-**Sample console output:**
-```
-Found 3 project(s).
-Scanning MyApp.Api.csproj ...
-
-  Project : C:\Dev\MySolution\src\MyApp.Api\MyApp.Api.csproj
-  Packages: 8 direct reference(s) analysed
-  Duration: 142 ms
-
-  ✗ 2 unused package(s) found:
-
-    • Newtonsoft.Json 13.0.3
-      No namespace from this package appears in any using directive
-    • Serilog.Sinks.File 5.0.0
-      No namespace from this package appears in any using directive
-
-  Run 'slimdep fix <project>' to remove them automatically.
-
-  ⚠ 1 package(s) used directly but only referenced transitively (SLIMDEP002):
-
-    • Microsoft.Data.Sqlite.Core 8.0.0
-      Code uses Microsoft.Data.Sqlite but the package is only referenced transitively (via Microsoft.EntityFrameworkCore.Sqlite.Core). Add an explicit <PackageReference>.
-
-  ℹ 1 package(s) kept as version pins:
-
-    • SQLitePCLRaw.bundle_e_sqlite3 2.1.10
-      Version pin: overrides 2.1.6 required by Microsoft.EntityFrameworkCore.Sqlite. Removing it would downgrade SQLitePCLRaw.bundle_e_sqlite3 to 2.1.6.
-
-  ℹ 1 package(s) not reported (default safe list): coverlet.collector
-    Use --no-default-ignores to analyse them.
-
-Scanning MyApp.Core.csproj ...
-
-  ✓ All packages are used. Nothing to remove.
-```
-
-**Sample JSON output** (`--format json`). A single project produces one object; a folder with several projects produces a JSON array of these objects. Transitive findings add `"transitive": true`. `undeclaredPackages`, `pinnedPackages` and `skippedPackages` are always present (empty when there is nothing to report). When JSON or SARIF goes to stdout, stdout holds only that document, so it can be piped straight into `jq` or another tool.
-```json
-{
-  "projectPath": "C:\\Dev\\MySolution\\src\\MyApp.Api\\MyApp.Api.csproj",
-  "totalDirectPackages": 8,
-  "unusedCount": 2,
-  "durationMs": 142.35,
-  "unusedPackages": [
-    {
-      "name": "Newtonsoft.Json",
-      "version": "13.0.3",
-      "reason": "No namespace from this package appears in any using directive"
-    },
-    {
-      "name": "Serilog.Sinks.File",
-      "version": "5.0.0",
-      "reason": "No namespace from this package appears in any using directive"
-    }
-  ],
-  "undeclaredPackages": [
-    {
-      "name": "Microsoft.Data.Sqlite.Core",
-      "version": "8.0.0",
-      "introducedBy": ["Microsoft.EntityFrameworkCore.Sqlite.Core"],
-      "usedNamespaces": ["Microsoft.Data.Sqlite"],
-      "reason": "Code uses Microsoft.Data.Sqlite but the package is only referenced transitively (via Microsoft.EntityFrameworkCore.Sqlite.Core). Add an explicit <PackageReference>."
-    }
-  ],
-  "pinnedPackages": [
-    {
-      "name": "SQLitePCLRaw.bundle_e_sqlite3",
-      "version": "2.1.10",
-      "transitiveVersion": "2.1.6",
-      "requiredBy": ["Microsoft.EntityFrameworkCore.Sqlite"],
-      "reason": "Version pin: overrides 2.1.6 required by Microsoft.EntityFrameworkCore.Sqlite. Removing it would downgrade SQLitePCLRaw.bundle_e_sqlite3 to 2.1.6."
-    }
-  ],
-  "skippedPackages": [
-    { "name": "coverlet.collector", "version": "6.0.2", "reason": "On the built-in safe list (coverlet.*)" }
-  ]
-}
-```
-
-**Sample SARIF output** (`--format sarif`) — paste into GitHub Code Scanning or Azure DevOps for inline PR annotations:
-```json
-{
-  "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
-  "version": "2.1.0",
-  "runs": [
-    {
-      "tool": { "driver": { "name": "SlimDep", "version": "1.2.0", "rules": [{ "id": "SLIMDEP001" }] } },
-      "results": [
-        {
-          "ruleId": "SLIMDEP001",
-          "level": "warning",
-          "message": { "text": "Unused package reference: Newtonsoft.Json 13.0.3. No namespace from this package appears in any using directive." },
-          "locations": [{ "physicalLocation": { "artifactLocation": { "uri": "file:///C:/Dev/MySolution/src/MyApp.Api/MyApp.Api.csproj" }, "region": { "startLine": 12 } } }]
-        }
-      ]
-    }
-  ]
-}
-```
-
-SLIMDEP002 findings appear as results with level `note`, and the `SLIMDEP002` rule is added to `rules` only when there are such findings. Version pins and safe-list skips are not SARIF results.
-
-**Exit codes:** `0` = all clean · `1` = unused packages found (or SLIMDEP002 findings with `--fail-on-undeclared`) · `2` = error
-
----
+Invalid command-line arguments exit with `1`, as reported by the argument parser. `ignore` exits `1` if `--path` doesn't exist, or if `remove` finds no `.slimdepignore`.
 
 ## What SlimDep reports
 
-### SLIMDEP001 — Unused package references
+| Finding | Meaning | `fix` | Fails `scan`? |
+|---|---|---|---|
+| **SLIMDEP001** Unused reference | A direct `<PackageReference>` whose namespaces your code never uses. | Removed | Yes |
+| Unused transitive (`--include-transitive`) | An indirect package your code doesn't use, shown with the reference that brings it in. Most transitive packages look like this. | Never touched | No |
+| **SLIMDEP002** Undeclared dependency | A transitive package your code **does** use without referencing it. It can disappear when the package that brings it in changes, so add an explicit `<PackageReference>`. | Never touched | Only with `--fail-on-undeclared` |
+| Version pin | An unused-looking direct reference that raises the version of a transitive dependency (usually a security fix). Removing it would downgrade that dependency. | Kept | No |
+| Safe-list skip | An unused-looking package that works without code references (see below). | Kept | No |
 
-A direct `<PackageReference>` none of whose namespaces appear in your code. `fix` removes these.
-
-### SLIMDEP002 — Transitive packages used directly
-
-Your code uses a package that you never referenced. It only arrives because some other package depends on it. If that other package is upgraded or removed, it can quietly drop the dependency and break your build. Add an explicit `<PackageReference>` for it.
-
-To keep false positives down, SlimDep reports a package only when your code explicitly imports or fully qualifies one of its namespaces. It ignores:
+**SLIMDEP002 avoids false positives.** It only counts names your code writes explicitly (`using`, fully-qualified names, `<Using>` items), and ignores:
 - namespaces that a direct package also provides
-- namespaces that the .NET shared framework provides (e.g. `System.Text.Json`)
+- namespaces that **every** target framework provides: the shared framework on .NET Core / .NET 5+, the .NET Standard API surface on .NET Framework and .NET Standard (so `System.Text.Json` is ignored on `net8.0` but reported on `net48`)
 - SDK implicit usings
-- packages that arrive only through your own project references
-- packages brought in by a direct metapackage, such as `xunit` → `xunit.assert`, because the metapackage counts as the declaration
+- packages that arrive only through your own project references, or through a direct metapackage such as `xunit` → `xunit.assert`
 
-SLIMDEP002 findings are informational; `--fail-on-undeclared` makes them fail CI. `.slimdepignore` and `--ignore` suppress them too.
-
-### Version pins
-
-Teams often add a direct reference only to force a newer version of a transitive dependency, usually to pick up a security fix. If such a reference looks unused, removing it would quietly downgrade the package. Here is how SlimDep tells: other packages depend on it, but every one of them asks for a lower version. Such references are listed as **kept as version pins**, never reported as unused, and `fix` leaves them alone.
+**Version pins are checked per target framework.** A reference counts as a pin when every package that depends on it, in that framework's graph, asks for a lower version. It is kept if it pins in any framework, and the frameworks are named when it doesn't pin in all of them.
 
 ### Built-in safe list
 
-Some packages do their job without your code ever importing them. SlimDep never reports them as unused:
-
 | Category | Packages |
 |---|---|
-| Test platform & adapters | `Microsoft.NET.Test.Sdk`, `xunit.runner.*`, `NUnit3TestAdapter`, `MSTest.TestAdapter`, `Microsoft.Testing.Extensions.*`, test loggers |
+| Test platform & adapters | `Microsoft.NET.Test.Sdk`, `xunit.runner.*`, `NUnit3TestAdapter`, `NUnit.ConsoleRunner`, `NUnit.Analyzers`, `MSTest.TestAdapter`, `Microsoft.Testing.Platform.MSBuild`, `Microsoft.Testing.Extensions.*`, `JunitXml.TestLogger`, `XunitXml.TestLogger`, `NunitXml.TestLogger`, `GitHubActionsTestLogger` |
 | Coverage | `coverlet.*`, `Microsoft.CodeCoverage` |
-| Source link & versioning | `Microsoft.SourceLink.*`, `MinVer`, `Nerdbank.GitVersioning`, `GitVersion.MsBuild` |
-| Design-time & CLI tooling | `*.Design`, `Microsoft.EntityFrameworkCore.Tools`, `Microsoft.VisualStudio.Web.CodeGeneration.*`, container tooling |
-| Runtime-loaded | `Microsoft.AspNetCore.SpaProxy`, `SQLitePCLRaw.bundle_*` |
-| Analyzers | `*.Analyzers`, `Microsoft.CodeAnalysis.NetAnalyzers` |
+| Source link, versioning | `Microsoft.SourceLink.*`, `MinVer`, `Nerdbank.GitVersioning`, `GitVersion.MsBuild`, `Microsoft.Build.Tasks.Git` |
+| Design-time & CLI tooling | `*.Design`, `Microsoft.EntityFrameworkCore.Tools`, `Microsoft.VisualStudio.Web.CodeGeneration.*`, `Microsoft.VisualStudio.Azure.Containers.Tools.Targets`, `Microsoft.NET.Build.Containers` |
+| Front-end & runtime-loaded | `Microsoft.TypeScript.MSBuild`, `Microsoft.Web.LibraryManager.Build`, `Microsoft.AspNetCore.SpaProxy`, `SQLitePCLRaw.bundle_*`, `SQLitePCLRaw.provider.*` |
+| Analyzers | `*.Analyzers`, `Microsoft.CodeAnalysis.NetAnalyzers`, `Microsoft.VisualStudio.Threading.Analyzers` |
 
-References marked `PrivateAssets="all"` (development-only dependencies) are treated the same way. Skipped packages are listed so nothing disappears silently. Pass `--no-default-ignores` to analyse them anyway.
+References marked `PrivateAssets="all"` (development-only dependencies) are treated the same way. The safe list also applies to transitive packages. Skipped packages are always listed, so nothing disappears silently.
 
----
+**Never reported at all:**
+- packages with no assemblies (build tools, source generators, metapackages)
+- packages the SDK adds automatically (`autoReferenced`, such as `NETStandard.Library`) and anything only they bring in
+- Central Package Management `GlobalPackageReference` entries
+- anything listed in `.slimdepignore` or passed with `--ignore`
 
-### `slimdep fix` — Remove unused packages
+## How usage is detected
 
-```bash
-slimdep fix <project> [options]
-```
-
-**Argument**
-
-| Argument | Description |
+| Source | What counts as using a package's namespace |
 |---|---|
-| `<project>` | Path to a `.csproj` file **or** a folder (all `.csproj` files found recursively, `obj/` excluded) |
+| Packages | `project.assets.json`, with all target frameworks merged. Public namespaces are read from each package's DLL metadata and cached in-process. The assets file is found via `MSBuildProjectExtensionsPath`, `BaseIntermediateOutputPath`, or `UseArtifactsOutput`/`ArtifactsPath`, falling back to `obj/`. |
+| C# (Roslyn, syntax only) | `using`, `global using`, `using static`, aliases. Fully-qualified names in types and expressions, including `global::`. Every branch of `#if`/`#elif`/`#else`. |
+| Project files | `<ImplicitUsings>` (per SDK: Web, Worker, BlazorWebAssembly, WinForms), `<Using>` items (including `Static`/`Alias`) in the project and `Directory.Build.props/.targets`, and generated `*.GlobalUsings.g.cs`. |
+| XAML (`.xaml`, `.axaml`) | `xmlns` values `clr-namespace:` (WPF, MAUI, Avalonia) and `using:` (UWP, WinUI, Avalonia). |
+| Razor (`.razor`, `.cshtml`) | `@using` (incl. static/alias), `@inject`, `@model`, `@inherits`, `@implements`, `@attribute`, `@typeparam`, `@layout`, `@code`/`@functions` blocks, inline `@Foo.Bar…` expressions, `@addTagHelper`. |
 
-**Options**
+Which files are scanned: everything in the project folder except its own `bin/` and `obj/`, folders starting with `.`, and folders containing another project. Linked `<Compile Include="…">` files and shared-project `.projitems` outside the folder are scanned too.
 
-| Option | Default | Description |
-|---|---|---|
-| `--dry-run` | off | Preview removals — no files written |
-| `--include-transitive` | off | Also list unused transitive packages (they are reported, not removed) |
-| `--no-default-ignores` | off | Also remove packages on the built-in safe list and `PrivateAssets="all"` references |
-| `--ignore <pkg>` | _(none)_ | Suppress a package from analysis (repeatable) |
-| `-?, -h, --help` | | Show help |
+`.slimdepignore`: SlimDep uses the nearest file found by searching upward from the project. It has one package name per line, matched case-insensitively; `#` starts a comment.
 
-**Examples:**
-```bash
-# Always preview first
-slimdep fix C:\Dev\MySolution --dry-run
+## Output formats
 
-# Remove unused packages from all projects in a folder
-slimdep fix C:\Dev\MySolution
+- **console**: a per-project summary with sections for unused, SLIMDEP002, version pins and safe-list skips.
+- **json**: one object per project, or an array when zero or several projects are scanned. Fields:
+  - `projectPath`, `totalDirectPackages`, `unusedCount`, `durationMs`
+  - `unusedPackages[]`: `name`, `version`, `reason`, plus `transitive: true` for transitive packages
+  - `undeclaredPackages[]`: `name`, `version`, `introducedBy`, `usedNamespaces`, `reason`
+  - `pinnedPackages[]`: `name`, `version`, `transitiveVersion`, `requiredBy`, `targetFrameworks` (only when it pins in some frameworks but not all), `reason`
+  - `skippedPackages[]`: `name`, `version`, `reason`
 
-# Single project
-slimdep fix MyApp.csproj
+  The four arrays are always present.
+- **sarif** (2.1.0): one run covering all projects, each project listed as an artifact; the tool version matches the package.
+  - SLIMDEP001 results are `warning`s pointing at the `<PackageReference>` line.
+  - Unused transitive packages and SLIMDEP002 results are `note`s. The `SLIMDEP002` rule is only included when it has results.
+  - Pins and skips aren't included.
 
-# Include transitive packages
-slimdep fix MyApp.csproj --include-transitive
-```
+With JSON or SARIF and no `--output`, stdout contains only the report, so it can be piped directly. [Full samples →](https://github.com/vinaydiddi/SlimDep/blob/main/USAGE.md)
 
-**Sample output:**
-```
-Found 2 project(s).
+## How `fix` edits files
 
-Scanning MyApp.Api.csproj ...
-  Unused packages (2):
-    - Newtonsoft.Json 13.0.3
-    - Serilog.Sinks.File 5.0.0
-  Removed 2 package(s) from MyApp.Api.csproj.
+- It removes only SLIMDEP001 references. It prints a "Kept" line for each version pin and safe-list package, and lists transitive findings as not removable.
+- It cuts only the matching `<PackageReference>` elements. Everything else stays byte-for-byte: quotes, attribute layout, entities, comments, whitespace, line endings, encoding (UTF-8, UTF-16 or a declared code page) and BOM.
+- An `<ItemGroup>` left empty is removed, unless it has a `Condition` or `Label` or contains comments.
+- A package declared outside the project file (e.g. `Directory.Build.props`) is listed as "not removed", for you to handle.
+- Legacy project files that declare the MSBuild XML namespace are supported.
+- Run `dotnet restore` afterwards to update the lock file.
 
-Scanning MyApp.Core.csproj ...
-  No unused packages found.
+## CI
 
-Run 'dotnet restore' to update the lockfile.
-```
-
-Version pins and safe-list packages are never removed; `fix` prints a "Kept" line for each so you can see why. `fix` edits only the matching `<PackageReference>` lines. Formatting, comments, line endings, BOM and the XML declaration stay as they were. An `<ItemGroup>` left empty is removed unless it has a `Condition`/`Label` or contains comments. A package declared outside the project file (e.g. in `Directory.Build.props`) is listed as "not removed" for you to handle by hand.
-
-**Exit codes:** `0` = success · `2` = one or more projects could not be scanned or updated
-
-After fixing, run:
-```bash
-dotnet restore
-```
-
----
-
-### Help
-
-```bash
-slimdep --help
-slimdep scan --help
-slimdep fix --help
-slimdep ignore --help
-```
-
----
-
-### `slimdep ignore` — Manage suppression list
-
-The `.slimdepignore` file suppresses specific packages from analysis. SlimDep auto-detects it by walking up from the project directory.
-
-```bash
-slimdep ignore add <package> [--path <dir>]     # add to .slimdepignore
-slimdep ignore remove <package> [--path <dir>]  # remove from .slimdepignore
-slimdep ignore list [--path <dir>]              # show current entries
-```
-
-**Examples:**
-```bash
-# Suppress a package used via reflection or DI
-slimdep ignore add Microsoft.EntityFrameworkCore.Design
-
-# Suppress inline without creating a file (one-off)
-slimdep scan . --ignore Newtonsoft.Json --ignore SomeAnalyzer
-
-# View the current ignore list
-slimdep ignore list
-
-# Remove a suppression
-slimdep ignore remove Microsoft.EntityFrameworkCore.Design
-```
-
-**Sample `.slimdepignore` file:**
-```
-# Packages used via reflection or DI registration
-Microsoft.EntityFrameworkCore.Design
-coverlet.collector
-Swashbuckle.AspNetCore
-```
-
-> The `--path` option lets you target a specific directory. Without it, the current working directory is used.
-
----
-
-## CI Pipeline Integration
-
-`scan` exits with code `1` when unused packages are found — drop it straight into any pipeline:
-
-**GitHub Actions — fail on unused packages:**
 ```yaml
-- name: Check for unused NuGet packages
-  run: slimdep scan .
+# GitHub Actions: fail on unused packages and annotate the PR
+- run: dotnet tool install --global SlimDep && dotnet restore
+- run: slimdep scan . --format sarif --output slimdep.sarif
+- uses: github/codeql-action/upload-sarif@v3
+  if: always()
+  with: { sarif_file: slimdep.sarif }
 ```
 
-**GitHub Actions — SARIF upload for inline PR annotations:**
-```yaml
-- name: SlimDep scan
-  run: slimdep scan . --format sarif --output slimdep.sarif
-
-- name: Upload SARIF results
-  uses: github/codeql-action/upload-sarif@v3
-  with:
-    sarif_file: slimdep.sarif
-```
-
-**Azure DevOps:**
-```yaml
-- script: slimdep scan .
-  displayName: 'SlimDep: Check unused packages'
-```
-
-**Azure DevOps — SARIF artifact:**
-```yaml
-- script: slimdep scan . --format sarif --output $(Build.ArtifactStagingDirectory)/slimdep.sarif
-  displayName: 'SlimDep: Scan for unused packages'
-- task: PublishBuildArtifacts@1
-  inputs:
-    PathtoPublish: '$(Build.ArtifactStagingDirectory)/slimdep.sarif'
-    ArtifactName: 'CodeAnalysisLogs'
-```
-
----
-
-## Supported Features
-
-| Feature | Status |
-|---|---|
-| Scan a single `.csproj` file | ✅ |
-| Scan a folder recursively (finds all `.csproj` files) | ✅ |
-| Automatically skip `obj/` folders during recursive search | ✅ |
-| Console output (human-readable with ✓/✗ indicators) | ✅ |
-| JSON output (`--format json`) | ✅ |
-| SARIF 2.1.0 output (`--format sarif`) with line-number locations | ✅ |
-| GitHub Code Scanning / Azure DevOps inline PR annotations via SARIF | ✅ |
-| Write report to a file (`--output`) | ✅ |
-| Detect unused direct package references | ✅ |
-| Report unused transitive (indirect) packages with the reference that brings them in (`--include-transitive`) | ✅ |
-| Multi-targeted projects: all target frameworks analysed, `#if` blocks included | ✅ |
-| SDK implicit usings, `<Using>` items and generated `GlobalUsings.g.cs` honoured | ✅ |
-| Formatting-preserving `fix` (whitespace, comments, line endings, BOM kept) | ✅ |
-| SLIMDEP002: transitive packages used directly without a `<PackageReference>` | ✅ |
-| Version-pin detection (security pins are kept, never reported as unused) | ✅ |
-| Built-in safe list for test, coverage, SourceLink and tooling packages (`--no-default-ignores` to disable) | ✅ |
-| Skip packages with no exported namespaces (build tools, source generators) | ✅ |
-| Auto-remove unused packages from `.csproj` (`fix` command) | ✅ |
-| Dry-run mode — preview removals without writing (`--dry-run`) | ✅ |
-| CI-friendly exit codes (0 = clean, 1 = unused found, 2 = error) | ✅ |
-| Multi-project fix in a single command | ✅ |
-| Roslyn syntax-only analysis (no build required) | ✅ |
-| Namespace-level matching via DLL reflection metadata | ✅ |
-| In-process namespace cache (fast repeated scans) | ✅ |
-| Fully-qualified name detection (Foo.Bar.Type without using directive) | ✅ |
-| .slimdepignore file support (suppress specific packages) | ✅ |
-| Inline `--ignore` flag (suppress without a file) | ✅ |
-| `slimdep ignore` CLI for managing .slimdepignore (add / remove / list) | ✅ |
-| Central Package Management (CPM) GlobalPackageReference detection | ✅ |
-| XAML clr-namespace scanning (WPF, MAUI) | ✅ |
-| Razor / CSHTML @using directive scanning (Blazor, MVC) | ✅ |
-| Parallel multi-project scanning (bounded by CPU count) | ✅ |
-
----
-
-## Prerequisites
-
-- [.NET 8 SDK or later](https://dotnet.microsoft.com/download) (.NET 8, 9, or 10)
-- Target project must be restored (`dotnet restore`) so that `obj/project.assets.json` exists
-
----
+On Azure DevOps, use `- script: slimdep scan .`. [More pipeline recipes →](https://github.com/vinaydiddi/SlimDep/blob/main/USAGE.md#ci-recipes)
 
 ## Limitations
 
-- Packages used only in XAML `x:Type` or code-behind without a `using` or `clr-namespace` declaration may be reported as unused
-- Matching is by namespace. If a package puts types into a namespace your code already imports for another reason (common with `Microsoft.Extensions.*` extension methods), it counts as used, and SDK implicit usings make this more likely
-- MSBuild conditions on `<Using>` items are not evaluated; conditional usings are treated as always present
-- Code under complex `#if` expressions that need some symbols defined and others undefined (e.g. `#if A && !B`) may be missed
-- Requires `obj/project.assets.json` — run `dotnet restore` before scanning
-- Source generators and build-only packages (no exported namespaces) are automatically excluded
-
----
+- Matching is by namespace. A package whose types sit in a namespace you already import (common with `Microsoft.Extensions.*` extension methods) counts as used.
+- Types used only via XAML `x:Type` or code-behind, with no `using`/`clr-namespace`, may be reported as unused. Review with `--dry-run`.
+- MSBuild conditions aren't evaluated. SlimDep assumes the widest case:
+  - conditional `<Using>` items count
+  - conditional `<Using Remove>` is ignored
+  - `ImplicitUsings` counts as on if any configuration enables it
+- Paths built from properties other than the `$(MSBuild…)` built-ins (e.g. `$(SolutionDir)`) can't be resolved, whether in `<Compile Include>` or in the intermediate output path.
+- `#if` code that needs some symbols defined and others undefined (e.g. `#if A && !B`) may be missed.
+- On .NET Framework targets, the .NET Standard API stands in for what the framework provides.
+- Razor files are scanned line by line, not with a full Razor parser.
+- C# only: no F# or VB.NET. Input is a `.csproj` or a folder; `.sln`/`.slnx` files aren't accepted.
 
 ## License
 
 MIT © 2026 Vinay Diddi
-
