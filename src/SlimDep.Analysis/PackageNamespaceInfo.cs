@@ -14,10 +14,11 @@ internal sealed class PackageNamespaceInfo
     public IReadOnlyList<string> IntroducedBy { get; init; } = [];
 
     /// <summary>
-    /// Packages (or "project X") that depend on this one, each with the minimum version it asks for.
-    /// Used to detect direct references that pin a higher version than the graph would resolve.
+    /// Per target framework: the resolved version and the packages (or "project X") that depend
+    /// on this one with the minimum version each asks for. Kept per target because dependencies
+    /// often differ by TFM — a reference can be redundant on net8.0 yet a version pin on net48.
     /// </summary>
-    public IReadOnlyList<DependencyRequirement> RequiredBy { get; init; } = [];
+    public IReadOnlyList<TargetDependencies> Targets { get; init; } = [];
 
     /// <summary>The package has no compile/runtime assemblies — a metapackage or tooling-only package.</summary>
     public bool HasNoAssemblies { get; init; }
@@ -29,6 +30,12 @@ internal sealed class PackageNamespaceInfo
 /// <summary>A dependency edge: <paramref name="Dependent"/> requires at least <paramref name="MinVersion"/>.</summary>
 internal sealed record DependencyRequirement(string Dependent, string MinVersion);
 
+/// <summary>How a package resolves within one target framework.</summary>
+internal sealed record TargetDependencies(
+    string TargetFramework,
+    string ResolvedVersion,
+    IReadOnlyList<DependencyRequirement> RequiredBy);
+
 /// <summary>Everything SlimDep reads from <c>project.assets.json</c>.</summary>
 internal sealed class AssetsInfo
 {
@@ -37,4 +44,7 @@ internal sealed class AssetsInfo
 
     /// <summary>Shared frameworks referenced by the project, e.g. <c>Microsoft.AspNetCore.App</c>.</summary>
     public required IReadOnlyList<string> FrameworkReferences { get; init; }
+
+    /// <summary>Target frameworks of the restore graph (RID suffixes removed), e.g. <c>net8.0</c>, <c>net48</c>.</summary>
+    public IReadOnlyList<string> TargetFrameworks { get; init; } = [];
 }

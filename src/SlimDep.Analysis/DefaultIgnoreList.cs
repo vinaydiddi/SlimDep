@@ -50,6 +50,7 @@ internal static class DefaultIgnoreList
 
         // Native providers loaded by reflection at runtime (Microsoft.Data.Sqlite calls Batteries_V2.Init)
         "SQLitePCLRaw.bundle_*",
+        "SQLitePCLRaw.provider.*",
 
         // Analyzers
         "*.Analyzers",

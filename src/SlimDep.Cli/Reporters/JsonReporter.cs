@@ -52,6 +52,8 @@ internal sealed class JsonReporter : IReporter
             version = p.Version,
             transitiveVersion = p.TransitiveVersion,
             requiredBy = p.RequiredBy,
+            // Only present when the reference pins on some target frameworks but not all
+            targetFrameworks = p.TargetFrameworks,
             reason = p.Reason,
         }),
         skippedPackages = result.SkippedPackages.Select(p => new

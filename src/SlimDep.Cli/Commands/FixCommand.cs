@@ -66,6 +66,11 @@ internal sealed class FixCommand : Command
                 {
                     scanResults[i] = (null, $"{Path.GetFileName(projectPath)}: {ex.Message}");
                 }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // Never let one project's unexpected failure abort the rest or masquerade as success
+                    scanResults[i] = (null, $"{Path.GetFileName(projectPath)}: {ex.GetType().Name}: {ex.Message}");
+                }
                 finally
                 {
                     semaphore.Release();

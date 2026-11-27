@@ -1,6 +1,3 @@
-using System.Xml;
-using System.Xml.Linq;
-
 namespace SlimDep.Analysis;
 
 /// <summary>
@@ -9,11 +6,11 @@ namespace SlimDep.Analysis;
 /// and <c>&lt;Using Include="..." /&gt;</c> items in the project file or <c>Directory.Build.*</c> files.
 /// </summary>
 /// <remarks>
-/// The compiler sees these through a generated <c>obj/**/*.GlobalUsings.g.cs</c> file, which
-/// <see cref="SourceAnalyzer"/> skips along with the rest of <c>obj/</c>. That file only exists
-/// after a build, so the usings are also evaluated statically from the project XML.
-/// MSBuild conditions are not evaluated: conditional items are treated as present, which can
-/// only make a package look used, never unused.
+/// The compiler sees these through a generated <c>*.GlobalUsings.g.cs</c> file in the intermediate
+/// output folder, which <see cref="SourceAnalyzer"/> does not scan. That file only exists after a
+/// build, so the usings are also evaluated statically from the project XML. MSBuild conditions are
+/// not evaluated: conditional items count as present and conditional removals are ignored, which
+/// can only make a package look used, never unused.
 /// </remarks>
 internal static class ProjectUsingsResolver
 {
@@ -52,37 +49,36 @@ internal static class ProjectUsingsResolver
     internal static HashSet<string> Resolve(string projectPath, CancellationToken ct = default)
     {
         var set = new NamespaceSet();
-        ResolveInto(projectPath, set, ct);
+        ResolveInto(projectPath, set, intermediateDirectory: null, ct);
         return set.All;
     }
 
-    /// <summary>Adds every namespace globally imported by the project's MSBuild files to <paramref name="result"/>.</summary>
-    internal static void ResolveInto(string projectPath, NamespaceSet result, CancellationToken ct = default)
+    /// <summary>
+    /// Adds every namespace globally imported by the project's MSBuild files to <paramref name="result"/>.
+    /// <paramref name="intermediateDirectory"/> is where generated <c>GlobalUsings.g.cs</c> files live
+    /// (the folder holding <c>project.assets.json</c>); defaults to <c>obj/</c>.
+    /// </summary>
+    internal static void ResolveInto(string projectPath, NamespaceSet result, string? intermediateDirectory = null, CancellationToken ct = default)
     {
         string projectDir = Path.GetDirectoryName(projectPath) ?? ".";
+        var files = MsBuildFiles.LoadProjectChain(projectPath);
+        var project = files.FirstOrDefault(f => string.Equals(f.Path, Path.GetFullPath(projectPath), StringComparison.OrdinalIgnoreCase));
 
-        // MSBuild imports the nearest Directory.Build.props before the project body and the
-        // nearest Directory.Build.targets after it; evaluate in that order so later files win.
-        var files = new List<XDocument>();
-        AddIfLoaded(files, FindNearest(projectDir, "Directory.Build.props"));
-        XDocument? project = TryLoad(projectPath);
-        AddIfLoaded(files, project);
-        AddIfLoaded(files, FindNearest(projectDir, "Directory.Build.targets"));
+        string? sdk = project?.Document.Root?.Attribute("Sdk")?.Value;
+        // Conditions are not evaluated, so consider every value a property could take in some
+        // configuration: implicit usings count as enabled if any reachable assignment enables them.
+        var implicitUsings = MsBuildFiles.PossibleValues(files, "ImplicitUsings");
+        bool implicitUsingsEnabled = implicitUsings.Contains("enable") || implicitUsings.Contains("true");
+        bool useWindowsForms = MsBuildFiles.PossibleValues(files, "UseWindowsForms").Contains("true");
 
-        string? sdk = project?.Root?.Attribute("Sdk")?.Value;
-        string? implicitUsings = LastPropertyValue(files, "ImplicitUsings");
-        bool useWindowsForms = string.Equals(LastPropertyValue(files, "UseWindowsForms"), "true", StringComparison.OrdinalIgnoreCase);
+        // SDK implicit usings are not explicit — they are imported whether or not the code needs
+        // them — while <Using> items are written by the user. Static/aliased items name a type.
+        var namespaces = new List<(string Ns, bool Explicit, bool IsTypeName)>();
 
-        // (namespace, explicit): SDK implicit usings are not explicit — they are imported whether
-        // or not the code needs them — while <Using> items are written by the user.
-        var namespaces = new List<(string Ns, bool Explicit)>();
-
-        if (implicitUsings is not null
-            && (implicitUsings.Equals("enable", StringComparison.OrdinalIgnoreCase)
-                || implicitUsings.Equals("true", StringComparison.OrdinalIgnoreCase)))
+        if (implicitUsingsEnabled)
         {
             var implicitList = new List<string>(BaseImplicitUsings);
-            foreach (string sdkName in SplitList(sdk))
+            foreach (string sdkName in MsBuildFiles.SplitList(sdk))
             {
                 // Sdk may carry a version: "Microsoft.NET.Sdk.Web/8.0.0"
                 string name = sdkName.Split('/')[0];
@@ -92,85 +88,50 @@ internal static class ProjectUsingsResolver
             if (useWindowsForms)
                 implicitList.AddRange(WindowsFormsUsings);
 
-            namespaces.AddRange(implicitList.Select(ns => (ns, false)));
+            namespaces.AddRange(implicitList.Select(ns => (ns, false, false)));
         }
 
         // <Using Include="..."/> and <Using Remove="..."/> items, in evaluation order.
-        foreach (var doc in files)
+        foreach (var file in files)
         {
-            foreach (var item in doc.Descendants().Where(e => e.Name.LocalName == "Using"))
+            foreach (var item in file.Document.Descendants().Where(e => e.Name.LocalName == "Using"))
             {
-                foreach (string ns in SplitList(item.Attribute("Include")?.Value))
-                    namespaces.Add((ns, true));
-                foreach (string ns in SplitList(item.Attribute("Remove")?.Value))
-                    namespaces.RemoveAll(n => n.Ns.Equals(ns, StringComparison.Ordinal));
+                // <Using Include="Foo.Bar.Type" Static="true"/> and <Using Include="Foo.Bar.Type" Alias="T"/>
+                // name a type (like 'using static' / 'using T = ...'), not a namespace.
+                bool isTypeName = string.Equals(item.Attribute("Static")?.Value?.Trim(), "true", StringComparison.OrdinalIgnoreCase)
+                                  || !string.IsNullOrWhiteSpace(item.Attribute("Alias")?.Value);
+
+                foreach (string ns in MsBuildFiles.SplitList(item.Attribute("Include")?.Value))
+                    namespaces.Add((ns, true, isTypeName));
+
+                // A conditional removal may not apply in every configuration; applying it anyway
+                // could make a needed package look unused, so only unconditional removals count.
+                if (!MsBuildFiles.IsConditional(item))
+                {
+                    foreach (string ns in MsBuildFiles.SplitList(item.Attribute("Remove")?.Value))
+                        namespaces.RemoveAll(n => n.Ns.Equals(ns, StringComparison.Ordinal));
+                }
             }
         }
 
-        foreach (var (ns, isExplicit) in namespaces)
-            result.AddImport(ns, isExplicit);
+        foreach (var (ns, isExplicit, isTypeName) in namespaces)
+        {
+            if (isTypeName)
+                result.AddQualifiedName(ns);
+            else
+                result.AddImport(ns, isExplicit);
+        }
 
         // If the project has been built, the generated GlobalUsings file is authoritative.
-        string objDir = Path.Combine(projectDir, "obj");
+        string objDir = intermediateDirectory ?? Path.Combine(projectDir, "obj");
         if (Directory.Exists(objDir))
         {
-            foreach (string generated in Directory.EnumerateFiles(objDir, "*.GlobalUsings.g.cs", SearchOption.AllDirectories))
+            var options = new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true };
+            foreach (string generated in Directory.EnumerateFiles(objDir, "*.GlobalUsings.g.cs", options))
             {
                 ct.ThrowIfCancellationRequested();
                 SourceAnalyzer.CollectUsingsFromFile(generated, result, ct);
             }
         }
-    }
-
-    private static string? LastPropertyValue(List<XDocument> files, string propertyName)
-    {
-        string? value = null;
-        foreach (var doc in files)
-        {
-            foreach (var prop in doc.Descendants().Where(e => e.Name.LocalName == propertyName
-                                                             && e.Parent?.Name.LocalName == "PropertyGroup"))
-            {
-                value = prop.Value.Trim();
-            }
-        }
-        return value;
-    }
-
-    private static IEnumerable<string> SplitList(string? value) =>
-        string.IsNullOrWhiteSpace(value)
-            ? []
-            : value.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-
-    private static XDocument? FindNearest(string startDir, string fileName)
-    {
-        string? dir = startDir;
-        while (dir is not null)
-        {
-            string candidate = Path.Combine(dir, fileName);
-            if (File.Exists(candidate))
-                return TryLoad(candidate);
-
-            string? parent = Path.GetDirectoryName(dir);
-            if (parent == dir) break;
-            dir = parent;
-        }
-        return null;
-    }
-
-    private static XDocument? TryLoad(string path)
-    {
-        try
-        {
-            return XDocument.Load(path);
-        }
-        catch (Exception ex) when (ex is IOException or XmlException or UnauthorizedAccessException)
-        {
-            return null;
-        }
-    }
-
-    private static void AddIfLoaded(List<XDocument> files, XDocument? doc)
-    {
-        if (doc is not null) files.Add(doc);
     }
 }

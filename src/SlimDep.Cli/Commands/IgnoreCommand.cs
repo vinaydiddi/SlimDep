@@ -57,10 +57,24 @@ internal sealed class IgnoreAddCommand : Command
                 }
             }
 
-            File.AppendAllText(ignoreFile, $"{package}{Environment.NewLine}");
+            // If the file doesn't end with a line break, appending directly would glue the new
+            // entry onto the last one ("Pkg.AFoo") and silently drop both suppressions.
+            string prefix = NeedsLeadingNewLine(ignoreFile) ? Environment.NewLine : string.Empty;
+            File.AppendAllText(ignoreFile, $"{prefix}{package}{Environment.NewLine}");
             Console.WriteLine($"Added '{package}' to {ignoreFile}");
             return 0;
         });
+    }
+
+    /// <summary>True when the file exists, is non-empty and its last byte is not a line break.</summary>
+    internal static bool NeedsLeadingNewLine(string path)
+    {
+        if (!File.Exists(path)) return false;
+        using var stream = File.OpenRead(path);
+        if (stream.Length == 0) return false;
+        stream.Seek(-1, SeekOrigin.End);
+        int last = stream.ReadByte();
+        return last != '\n' && last != '\r';
     }
 }
 

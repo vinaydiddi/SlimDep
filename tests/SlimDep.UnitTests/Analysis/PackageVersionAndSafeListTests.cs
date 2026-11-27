@@ -43,6 +43,7 @@ public sealed class DefaultIgnoreListTests
     [InlineData("StyleCop.Analyzers")]
     [InlineData("Microsoft.AspNetCore.SpaProxy")]
     [InlineData("SQLitePCLRaw.bundle_e_sqlite3")]
+    [InlineData("SQLitePCLRaw.provider.e_sqlite3")]
     public void Match_KnownToolingPackages(string name)
     {
         DefaultIgnoreList.Match(name).Should().NotBeNull();

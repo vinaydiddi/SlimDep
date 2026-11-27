@@ -331,7 +331,123 @@ public sealed class ProjectAnalyzerTests : IDisposable
         result.PinnedPackages.Should().ContainSingle().Which.TransitiveVersion.Should().Be("1.4.0");
     }
 
+    [Fact]
+    public async Task Pin_OnlyOnOneTargetFramework_IsKept_AndNamesThatTarget()
+    {
+        // net8.0: Core asks for the same version → redundant there.
+        // net48:  Core asks for 1.0.0 → removing the reference would downgrade net48.
+        WriteCsprojWith(Core, Fa);
+        WriteAssets(direct: [Core, Fa], targets: new()
+        {
+            ["net8.0"] = [Pkg(Core, CoreDll, deps: Dep(Fa, "1.5.3")), Pkg(Fa, FaDll, version: "1.5.3")],
+            ["net48"] = [Pkg(Core, CoreDll, deps: Dep(Fa, "1.0.0")), Pkg(Fa, FaDll, version: "1.5.3")],
+        });
+        WriteSource("Program.cs", "using SlimDep.Core.Models;");
+
+        var result = await Analyze();
+
+        result.UnusedPackages.Should().BeEmpty("removing it would downgrade the net48 build");
+        var pin = result.PinnedPackages.Should().ContainSingle().Subject;
+        pin.TransitiveVersion.Should().Be("1.0.0");
+        pin.TargetFrameworks.Should().Equal("net48");
+        pin.Reason.Should().Contain("on net48");
+    }
+
+    [Fact]
+    public async Task Pin_OnEveryTarget_DoesNotListTargets()
+    {
+        WriteCsprojWith(Core, Fa);
+        WriteAssets(direct: [Core, Fa], targets: new()
+        {
+            ["net8.0"] = [Pkg(Core, CoreDll, deps: Dep(Fa, "1.0.0")), Pkg(Fa, FaDll, version: "1.5.3")],
+            ["net48"] = [Pkg(Core, CoreDll, deps: Dep(Fa, "1.0.0")), Pkg(Fa, FaDll, version: "1.5.3")],
+        });
+        WriteSource("Program.cs", "using SlimDep.Core.Models;");
+
+        var result = await Analyze();
+
+        result.PinnedPackages.Should().ContainSingle().Which.TargetFrameworks.Should().BeNull();
+    }
+
+    // ── SDK implicit packages ─────────────────────────────────────────────────
+
+    [Fact]
+    public async Task AutoReferencedSdkPackage_AndWhatItBringsIn_AreNeverReported()
+    {
+        // NETStandard.Library is marked autoReferenced by WriteAssets; give it assemblies and a dependency
+        string platform = $"Pkg.Platform{_suffix}";
+        string sdkVersion = $"2.0.{Random.Shared.Next(100_000)}"; // unique cache key
+        WriteCsprojWith(Fa);
+        WriteAssets(direct: [Fa], targets: Net8(
+            Pkg(Fa, FaDll),
+            Pkg("NETStandard.Library", StjDll, version: sdkVersion, deps: Dep(platform)),
+            Pkg(platform, CoreDll)));
+        WriteSource("Program.cs", "using FluentAssertions;\nusing SlimDep.Core.Models;");
+
+        var result = await Analyze(includeTransitive: true);
+
+        result.UnusedPackages.Should().BeEmpty();
+        result.UndeclaredPackages.Should().BeEmpty();
+    }
+
+    // ── Framework namespaces depend on the target framework ───────────────────
+
+    [Fact]
+    public async Task Undeclared_FrameworkNamespaceOnNetFramework_IsReported()
+    {
+        // System.Text.Json ships with .NET 8 but not with .NET Framework 4.8
+        string stj = $"Pkg.Stj{_suffix}";
+        WriteCsprojWith(Core);
+        WriteAssets(direct: [Core], targets: new()
+        {
+            ["net48"] = [Pkg(Core, CoreDll, deps: Dep(stj)), Pkg(stj, StjDll)],
+        });
+        WriteSource("Program.cs", "using SlimDep.Core.Models;\nusing System.Text.Json;");
+
+        var result = await Analyze();
+
+        result.UndeclaredPackages.Should().ContainSingle(p => p.Name == stj);
+    }
+
+    [Fact]
+    public async Task Undeclared_MultiTarget_NamespaceMissingFromOneFramework_IsReported()
+    {
+        string stj = $"Pkg.Stj{_suffix}";
+        WriteCsprojWith(Core);
+        WriteAssets(direct: [Core], targets: new()
+        {
+            ["net8.0"] = [Pkg(Core, CoreDll, deps: Dep(stj)), Pkg(stj, StjDll)],
+            ["net48"] = [Pkg(Core, CoreDll, deps: Dep(stj)), Pkg(stj, StjDll)],
+        });
+        WriteSource("Program.cs", "using SlimDep.Core.Models;\nusing System.Text.Json;");
+
+        var result = await Analyze();
+
+        result.UndeclaredPackages.Should().ContainSingle(p => p.Name == stj,
+            "the net48 build needs the package even though net8.0 has the namespace built in");
+    }
+
     // ── Default safe list ─────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task SafeList_AppliesToUnusedTransitivePackages()
+    {
+        const string bundle = "SQLitePCLRaw.bundle_green";
+        string version = $"2.1.{Random.Shared.Next(100_000)}";
+        WriteCsprojWith(Core);
+        WriteAssets(direct: [Core], targets: Net8(
+            Pkg(Core, CoreDll, deps: Dep(bundle, version)),
+            Pkg(bundle, FaDll, version: version)));
+        WriteSource("Program.cs", "using SlimDep.Core.Models;");
+
+        var result = await Analyze(includeTransitive: true);
+
+        result.UnusedPackages.Should().BeEmpty();
+        result.SkippedPackages.Should().ContainSingle(p => p.Name == bundle);
+
+        var noIgnores = await Analyze(includeTransitive: true, useDefaultIgnores: false);
+        noIgnores.UnusedPackages.Should().ContainSingle(p => p.Name == bundle && p.IsTransitive);
+    }
 
     [Fact]
     public async Task SafeList_UnusedTestAdapter_IsSkippedNotUnused()
