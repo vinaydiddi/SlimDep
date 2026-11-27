@@ -67,16 +67,40 @@ internal static class CsprojEditor
         }
 
         var lineStarts = ComputeLineStarts(text);
-        var spans = toCut
-            .Select(e => ExpandToLines(text, ElementSpan(text, lineStarts, e)))
+        var rawSpans = toCut
+            .Select(e => ElementSpan(text, lineStarts, e))
             .OrderBy(s => s.Start)
             .ToList();
+
+        // Elements separated only by spaces/tabs on the same line (<A/> <B/>) become one span, so a
+        // line whose every element is removed is removed whole instead of leaving its indentation.
+        var merged = new List<(int Start, int End)>();
+        foreach (var span in rawSpans)
+        {
+            if (merged.Count > 0)
+            {
+                var last = merged[^1];
+                if (span.Start <= last.End || IsInlineWhitespace(text, last.End, span.Start))
+                {
+                    merged[^1] = (last.Start, Math.Max(last.End, span.End));
+                    continue;
+                }
+            }
+            merged.Add(span);
+        }
+
+        var spans = merged.Select(s => ExpandToLines(text, s)).OrderBy(s => s.Start).ToList();
 
         var sb = new StringBuilder(text.Length);
         int pos = 0;
         foreach (var (start, end) in spans)
         {
-            if (start < pos) continue; // nested in a span already cut
+            if (start < pos)
+            {
+                // Overlaps the previous cut (expansion may reach into a neighbour): extend it
+                pos = Math.Max(pos, end);
+                continue;
+            }
             sb.Append(text, pos, start - pos);
             pos = end;
         }
@@ -91,6 +115,13 @@ internal static class CsprojEditor
         }
 
         return matches.Select(e => e.Attribute("Include")!.Value).ToList();
+    }
+
+    private static bool IsInlineWhitespace(string text, int from, int to)
+    {
+        for (int i = from; i < to; i++)
+            if (text[i] is not (' ' or '\t')) return false;
+        return true;
     }
 
     // ── Encoding ──────────────────────────────────────────────────────────────

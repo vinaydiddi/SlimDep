@@ -112,20 +112,24 @@ async function fixUnusedPackages(provider: UnusedPackagesProvider): Promise<void
     const toolPath = vscode.workspace.getConfiguration('slimdep').get<string>('toolPath', 'slimdep');
 
     const failed: string[] = [];
+    const succeeded: string[] = [];
     for (const projectPath of projectPaths) {
         const result = await runSlimdep(toolPath, ['fix', projectPath]);
-        if (!result.success) failed.push(`${path.basename(projectPath)}: ${result.error ?? 'unknown error'}`);
+        if (result.success) succeeded.push(projectPath);
+        else failed.push(`${path.basename(projectPath)}: ${result.error ?? 'unknown error'}`);
     }
 
     if (failed.length > 0) {
         vscode.window.showErrorMessage(`SlimDep: Failed to update ${failed.length} project(s). ${failed.join('; ')}`);
     } else {
-        vscode.window.showInformationMessage('SlimDep: Unused packages removed. Run dotnet restore to update lockfile.');
+        vscode.window.showInformationMessage('SlimDep: Unused packages removed. Run dotnet restore before scanning again.');
     }
 
-    // Re-scan rather than clearing, so findings fix didn't remove (transitive ones,
-    // failures) stay visible.
-    await scanWorkspace(provider);
+    // Don't re-scan here: until 'dotnet restore' runs, project.assets.json still lists the removed
+    // references and they would reappear. Drop them locally instead; transitive findings and
+    // projects that failed stay visible.
+    provider.markFixed(succeeded);
+    provider.refresh();
 }
 
 /**

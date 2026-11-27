@@ -29,7 +29,12 @@ internal static class ProjectLayout
             $"project.assets.json not found (looked in: {string.Join(", ", candidates.Select(c => $"'{c}'"))}). Run 'dotnet restore' first.");
     }
 
-    /// <summary>Possible locations of <c>project.assets.json</c>, most specific first.</summary>
+    /// <summary>
+    /// Possible locations of <c>project.assets.json</c>, most specific first. The default
+    /// <c>obj/</c> is included only when restore may actually write there: if the project
+    /// unconditionally and resolvably redirects its intermediate output, an old <c>obj/</c> left
+    /// behind is a stale restore graph and must not be analysed.
+    /// </summary>
     internal static List<string> AssetsFileCandidates(string projectPath)
     {
         projectPath = Path.GetFullPath(projectPath);
@@ -37,6 +42,7 @@ internal static class ProjectLayout
         string projectName = Path.GetFileNameWithoutExtension(projectPath);
         var files = MsBuildFiles.LoadProjectChain(projectPath);
         var candidates = new List<string>();
+        bool objPossible = true;
 
         void AddDirectory(string dir) =>
             candidates.Add(Path.GetFullPath(Path.Combine(projectDir, dir, "project.assets.json")));
@@ -45,23 +51,35 @@ internal static class ProjectLayout
         //    which defaults to BaseIntermediateOutputPath)
         foreach (string property in new[] { "MSBuildProjectExtensionsPath", "BaseIntermediateOutputPath" })
         {
-            foreach (var (value, file) in MsBuildFiles.PropertyValues(files, property))
+            var values = MsBuildFiles.PropertyValues(files, property);
+            bool allResolved = true;
+            foreach (var (value, file, _) in values)
             {
                 if (MsBuildFiles.ExpandProperties(value, MsBuildFiles.WellKnownProperties(projectPath, file)) is { } dir)
                     AddDirectory(dir);
+                else
+                    allResolved = false;
             }
+
+            // Set unconditionally to paths we could resolve: restore never writes to obj/
+            if (values.Count > 0 && !values[0].IsConditional && allResolved)
+                objPossible = false;
         }
 
         // 2. Artifacts output layout: <ArtifactsPath>/obj/<ProjectName>/
         if (MsBuildFiles.PossibleValues(files, "UseArtifactsOutput").Contains("true"))
         {
             var roots = new List<string>();
-            foreach (var (value, file) in MsBuildFiles.PropertyValues(files, "ArtifactsPath"))
+            bool rootsKnown = true;
+            var artifactValues = MsBuildFiles.PropertyValues(files, "ArtifactsPath");
+            foreach (var (value, file, _) in artifactValues)
             {
                 if (MsBuildFiles.ExpandProperties(value, MsBuildFiles.WellKnownProperties(projectPath, file)) is { } root)
                     roots.Add(Path.GetFullPath(Path.Combine(projectDir, root)));
+                else
+                    rootsKnown = false;
             }
-            if (roots.Count == 0)
+            if (artifactValues.Count == 0 || artifactValues[0].IsConditional)
             {
                 // Default: an 'artifacts' folder next to Directory.Build.props, else next to the project
                 string? props = MsBuildFiles.FindNearest(projectDir, "Directory.Build.props");
@@ -69,12 +87,16 @@ internal static class ProjectLayout
             }
             foreach (string root in roots)
                 candidates.Add(Path.Combine(root, "obj", projectName, "project.assets.json"));
+
+            if (MsBuildFiles.DefinitelyEquals(files, "UseArtifactsOutput", "true") && rootsKnown)
+                objPossible = false;
         }
 
-        // 3. SDK default
-        AddDirectory("obj");
+        // 3. SDK default — only if restore could still be writing there
+        if (objPossible || candidates.Count == 0)
+            AddDirectory("obj");
 
-        return candidates.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        return candidates.Distinct(MsBuildFiles.PathComparer).ToList();
     }
 
     // ── Source files compiled from outside the project folder ────────────────
@@ -107,7 +129,7 @@ internal static class ProjectLayout
             }
         }
 
-        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var result = new HashSet<string>(MsBuildFiles.PathComparer);
         foreach (var file in toScan)
         {
             foreach (var item in file.Document.Descendants().Where(e => e.Name.LocalName == "Compile"))
@@ -146,7 +168,8 @@ internal static class ProjectLayout
         string root = Path.GetFullPath(Path.Combine(baseDir, string.Join('/', segments[..firstWild])));
         if (!Directory.Exists(root)) yield break;
 
-        var regex = GlobToRegex(string.Join('/', segments[firstWild..]));
+        // Glob matching follows the file system: case-insensitive on Windows/macOS, sensitive on Linux
+        var regex = GlobToRegex(string.Join('/', segments[firstWild..]), MsBuildFiles.PathComparer == StringComparer.OrdinalIgnoreCase);
         var options = new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true, AttributesToSkip = 0 };
         foreach (string file in Directory.EnumerateFiles(root, "*", options))
         {
@@ -155,7 +178,7 @@ internal static class ProjectLayout
         }
     }
 
-    private static Regex GlobToRegex(string glob)
+    private static Regex GlobToRegex(string glob, bool ignoreCase)
     {
         var sb = new StringBuilder("^");
         for (int i = 0; i < glob.Length; i++)
@@ -172,6 +195,6 @@ internal static class ProjectLayout
             else sb.Append(Regex.Escape(c.ToString()));
         }
         sb.Append('$');
-        return new Regex(sb.ToString(), RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        return new Regex(sb.ToString(), (ignoreCase ? RegexOptions.IgnoreCase : RegexOptions.None) | RegexOptions.CultureInvariant);
     }
 }

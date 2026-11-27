@@ -427,6 +427,25 @@ public sealed class ProjectAnalyzerTests : IDisposable
             "the net48 build needs the package even though net8.0 has the namespace built in");
     }
 
+    [Fact]
+    public async Task Undeclared_PackageOnlyOnModernTarget_FrameworkExemptionStillApplies()
+    {
+        // The System.Text.Json package exists only in the net8.0 graph, where the framework provides
+        // the namespace; net48 must not cancel that exemption.
+        string stj = $"Pkg.Stj{_suffix}";
+        WriteCsprojWith(Core);
+        WriteAssets(direct: [Core], targets: new()
+        {
+            ["net8.0"] = [Pkg(Core, CoreDll, deps: Dep(stj)), Pkg(stj, StjDll)],
+            ["net48"] = [Pkg(Core, CoreDll)],
+        });
+        WriteSource("Program.cs", "using SlimDep.Core.Models;\n#if NET8_0\nusing System.Text.Json;\n#endif");
+
+        var result = await Analyze();
+
+        result.UndeclaredPackages.Should().BeEmpty();
+    }
+
     // ── Default safe list ─────────────────────────────────────────────────────
 
     [Fact]

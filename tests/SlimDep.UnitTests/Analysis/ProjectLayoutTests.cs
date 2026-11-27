@@ -83,6 +83,76 @@ public sealed class ProjectLayoutTests : IDisposable
     }
 
     [Fact]
+    public void Assets_BackslashPaths_ResolveOnEveryOs()
+    {
+        // MSBuild accepts '\' on Linux/macOS too; .NET treats it as a file-name character there
+        Write(Path.Combine(_root, "Directory.Build.props"),
+            @"<Project><PropertyGroup><BaseIntermediateOutputPath>..\..\build\obj\$(MSBuildProjectName)\</BaseIntermediateOutputPath></PropertyGroup></Project>");
+        Write(_csproj, "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+        string expected = Path.Combine(_root, "build", "obj", "App", "project.assets.json");
+        Write(expected, "{}");
+
+        ProjectLayout.FindAssetsFile(_csproj).Should().Be(expected);
+    }
+
+    [Fact]
+    public void Assets_BackslashArtifactsPath_ResolvesOnEveryOs()
+    {
+        Write(Path.Combine(_root, "Directory.Build.props"), """
+            <Project><PropertyGroup>
+              <UseArtifactsOutput>true</UseArtifactsOutput>
+              <ArtifactsPath>$(MSBuildThisFileDirectory)out\artifacts</ArtifactsPath>
+            </PropertyGroup></Project>
+            """);
+        Write(_csproj, "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+
+        ProjectLayout.AssetsFileCandidates(_csproj).Should().Equal(
+            Path.Combine(_root, "out", "artifacts", "obj", "App", "project.assets.json"));
+    }
+
+    [Fact]
+    public void Assets_RedirectedButNotRestored_StaleObjIsNotUsed()
+    {
+        Write(Path.Combine(_root, "Directory.Build.props"),
+            "<Project><PropertyGroup><UseArtifactsOutput>true</UseArtifactsOutput></PropertyGroup></Project>");
+        Write(_csproj, "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+        Write(Path.Combine(_projectDir, "obj", "project.assets.json"), "{}"); // left over from before
+
+        var act = () => ProjectLayout.FindAssetsFile(_csproj);
+
+        act.Should().Throw<SlimDepException>().WithMessage("*artifacts*dotnet restore*");
+        ProjectLayout.AssetsFileCandidates(_csproj).Should().NotContain(c => c.Contains($"{Path.DirectorySeparatorChar}App{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}"));
+    }
+
+    [Fact]
+    public void Assets_ConditionalRedirect_ObjStillPossible()
+    {
+        Write(Path.Combine(_root, "Directory.Build.props"),
+            "<Project><PropertyGroup Condition=\"'$(CI)' == 'true'\"><BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)ci-obj/</BaseIntermediateOutputPath></PropertyGroup></Project>");
+        Write(_csproj, "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+        string obj = Path.Combine(_projectDir, "obj", "project.assets.json");
+        Write(obj, "{}");
+
+        ProjectLayout.FindAssetsFile(_csproj).Should().Be(obj);
+    }
+
+    [Fact]
+    public void Compiled_FilesDifferingOnlyInCase_BothKeptOnLinux()
+    {
+        if (!OperatingSystem.IsLinux()) return; // only Linux file systems are case-sensitive by default
+
+        Write(Path.Combine(_root, "src", "Shared", "Util.cs"), "");
+        Write(Path.Combine(_root, "src", "Shared", "util.cs"), "");
+        Write(_csproj, """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <ItemGroup><Compile Include="../Shared/*.cs" /></ItemGroup>
+            </Project>
+            """);
+
+        ProjectLayout.CompiledSourceFiles(_csproj).Should().HaveCount(2);
+    }
+
+    [Fact]
     public void Assets_Missing_ErrorListsLocations()
     {
         Write(_csproj, "<Project Sdk=\"Microsoft.NET.Sdk\" />");

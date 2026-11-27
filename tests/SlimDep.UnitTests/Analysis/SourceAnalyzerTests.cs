@@ -163,17 +163,107 @@ public sealed class SourceAnalyzerTests : IDisposable
     }
 
     [Fact]
-    public void Collect_NestedProjectAndDotFolders_AreSkipped()
+    public void Collect_NestedProject_CountsAsUsedButNotExplicit()
     {
+        // The SDK's default **/*.cs glob compiles nested project folders too, unless removed
         WriteFile(Path.Combine("tests", "App.Tests", "App.Tests.csproj"), "<Project />");
         WriteFile(Path.Combine("tests", "App.Tests", "T.cs"), "using Only.In.Tests;");
-        WriteFile(Path.Combine(".vs", "X.cs"), "using Only.In.Dot;");
+        WriteFile(Path.Combine("tests", "App.Tests", "obj", "Gen.cs"), "using Nested.Build.Output;");
         WriteFile("Main.cs", "using Main.Ns;");
+
+        var result = SourceAnalyzer.Collect(_tempDir, CancellationToken.None);
+
+        result.All.Should().Contain(["Main.Ns", "Only.In.Tests"]);
+        result.Explicit.Should().Contain("Main.Ns");
+        result.Explicit.Should().NotContain("Only.In.Tests", "it usually belongs to the nested project");
+        result.All.Should().NotContain("Nested.Build.Output", "the nested project's obj/ is build output");
+    }
+
+    [Fact]
+    public void Collect_DotFolders_AreSkipped()
+    {
+        WriteFile(Path.Combine(".vs", "X.cs"), "using Only.In.Dot;");
 
         var result = SourceAnalyzer.CollectUsedNamespaces(_tempDir, CancellationToken.None);
 
-        result.Should().Contain("Main.Ns");
-        result.Should().NotContain(["Only.In.Tests", "Only.In.Dot"]);
+        result.Should().NotContain("Only.In.Dot");
+    }
+
+    [Fact]
+    public void Collect_ExplicitCompileItemInsideNestedFolder_IsExplicit()
+    {
+        WriteFile(Path.Combine("lib", "Lib.csproj"), "<Project />");
+        string shared = Path.Combine(_tempDir, "lib", "Shared.cs");
+        WriteFile(shared, "using Shared.Explicit;");
+
+        var result = SourceAnalyzer.Collect(_tempDir, CancellationToken.None, [shared]);
+
+        result.Explicit.Should().Contain("Shared.Explicit");
+    }
+
+    [Fact]
+    public void Collect_ManyElifBranches_NoneSkipped()
+    {
+        // More than the old cap of 32 distinct symbols; the last branch must still be scanned
+        var sb = new System.Text.StringBuilder();
+        for (int i = 0; i < 40; i++)
+            sb.Append(i == 0 ? "#if" : "#elif").Append($" SYM{i}\nusing Branch.N{i};\n");
+        sb.Append("#endif\n");
+        WriteFile("Many.cs", sb.ToString());
+
+        var result = SourceAnalyzer.CollectUsedNamespaces(_tempDir, CancellationToken.None);
+
+        result.Should().Contain(["Branch.N0", "Branch.N32", "Branch.N39"]);
+    }
+
+    [Fact]
+    public void Collect_RazorCodeBlock_IfBranchesScanned()
+    {
+        WriteFile("Debug.razor", """
+            <p>hi</p>
+            @code {
+            #if DEBUG
+                private Dbg.Tools.Inspector _inspector = new();
+            #elif STAGING
+                private Stg.Tools.Probe _probe = new();
+            #endif
+            }
+            """);
+
+        var result = SourceAnalyzer.CollectUsedNamespaces(_tempDir, CancellationToken.None);
+
+        result.Should().Contain(["Dbg.Tools", "Stg.Tools"]);
+    }
+
+    [Fact]
+    public void Collect_RazorCodeBlock_CommentsAndLiteralsDontEndBlock()
+    {
+        WriteFile("Tricky.razor", """"
+            <p>Don't stop here</p>
+            @code {
+                // a closing brace in a comment: }
+                /* and another } */
+                private string _path = @"C:\temp\";
+                private string _raw = """ } """;
+                private char _c = '}';
+                private After.Comment.Service _svc = default!;
+            }
+            """");
+
+        var result = SourceAnalyzer.CollectUsedNamespaces(_tempDir, CancellationToken.None);
+
+        result.Should().Contain("After.Comment");
+    }
+
+    [Fact]
+    public void FindMatchingBrace_SkipsCommentsAndLiterals()
+    {
+        string text = "{ // }\n /* } */ \"}\" @\"\\\" '}' }X";
+
+        int close = SourceAnalyzer.FindMatchingBrace(text, 0);
+
+        text[close].Should().Be('}');
+        text[close + 1].Should().Be('X');
     }
 
     [Fact]

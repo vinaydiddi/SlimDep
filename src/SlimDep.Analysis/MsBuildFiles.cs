@@ -71,27 +71,52 @@ internal static class MsBuildFiles
     /// Every value (trimmed, original case) the property may hold after evaluation, in any
     /// configuration, in evaluation order. An unconditional assignment replaces what came
     /// before; a conditional one may or may not apply, so it is added alongside.
-    /// Each value is paired with the file it was set in (for <c>$(MSBuildThisFileDirectory)</c>).
+    /// Each value is paired with the file it was set in (for <c>$(MSBuildThisFileDirectory)</c>)
+    /// and whether it is conditional. If the first entry is unconditional, the property is
+    /// definitely set to one of the listed values; otherwise it may also keep its default.
     /// </summary>
-    internal static List<(string Value, MsBuildFile File)> PropertyValues(IEnumerable<MsBuildFile> files, string propertyName)
+    internal static List<(string Value, MsBuildFile File, bool IsConditional)> PropertyValues(IEnumerable<MsBuildFile> files, string propertyName)
     {
-        var values = new List<(string, MsBuildFile)>();
+        var values = new List<(string, MsBuildFile, bool)>();
         foreach (var file in files)
         {
             foreach (var prop in file.Document.Descendants().Where(e => e.Name.LocalName == propertyName
                                                                        && e.Parent?.Name.LocalName == "PropertyGroup"))
             {
-                if (!IsConditional(prop))
+                bool conditional = IsConditional(prop);
+                if (!conditional)
                     values.Clear();
-                values.Add((prop.Value.Trim(), file));
+                values.Add((prop.Value.Trim(), file, conditional));
             }
         }
         return values;
     }
 
+    /// <summary>
+    /// Converts an MSBuild path to the current OS's separators. MSBuild accepts both '\' and '/'
+    /// on every platform, but on Linux/macOS '\' is an ordinary file-name character to .NET.
+    /// </summary>
+    internal static string NormalizeSeparators(string path) =>
+        path.Replace('\\', System.IO.Path.DirectorySeparatorChar).Replace('/', System.IO.Path.DirectorySeparatorChar);
+
+    /// <summary>
+    /// Compares file paths the way the OS does: case-insensitively on Windows and macOS (default
+    /// file systems), case-sensitively elsewhere, so 'A.cs' and 'a.cs' stay distinct on Linux.
+    /// </summary>
+    internal static StringComparer PathComparer { get; } =
+        OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+
     /// <summary>The lower-cased set of <see cref="PropertyValues"/>, for boolean-ish properties.</summary>
     internal static HashSet<string> PossibleValues(IEnumerable<MsBuildFile> files, string propertyName) =>
         PropertyValues(files, propertyName).Select(v => v.Value.ToLowerInvariant()).ToHashSet(StringComparer.Ordinal);
+
+    /// <summary>True when the property is unconditionally set and every possible value equals <paramref name="value"/>.</summary>
+    internal static bool DefinitelyEquals(IEnumerable<MsBuildFile> files, string propertyName, string value)
+    {
+        var values = PropertyValues(files, propertyName);
+        return values.Count > 0 && !values[0].IsConditional
+               && values.All(v => v.Value.Equals(value, StringComparison.OrdinalIgnoreCase));
+    }
 
     /// <summary>
     /// True when the element or any ancestor carries a <c>Condition</c>, or sits inside a
@@ -113,7 +138,7 @@ internal static class MsBuildFiles
             unresolved = true;
             return m.Value;
         });
-        return unresolved || expanded.Contains("$(", StringComparison.Ordinal) ? null : expanded;
+        return unresolved || expanded.Contains("$(", StringComparison.Ordinal) ? null : NormalizeSeparators(expanded);
     }
 
     /// <summary>The well-known properties available for a file in a project.</summary>
