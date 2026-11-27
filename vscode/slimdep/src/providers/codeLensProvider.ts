@@ -14,7 +14,11 @@ export class CsprojCodeLensProvider implements vscode.CodeLensProvider {
     }
 
     provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
-        const unusedPackages = this._provider.getAllItems();
+        // Only direct (removable) findings for this project file; transitive findings have no
+        // PackageReference line, and other projects' findings don't apply here.
+        const docPath = document.uri.fsPath.toLowerCase();
+        const unusedPackages = this._provider.getRemovableItems()
+            .filter(p => p.projectPath.toLowerCase() === docPath);
         if (unusedPackages.length === 0) return [];
 
         const unusedNames = new Set(unusedPackages.map(p => p.packageName.toLowerCase()));

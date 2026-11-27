@@ -95,7 +95,7 @@
         "slimdep.autoScanOnOpen": {
           "type": "boolean",
           "default": false,
-          "description": "Automatically scan projects when a .csproj file is opened."
+          "description": "Automatically scan all projects when a workspace containing a .csproj file is opened."
         },
         "slimdep.includeTransitive": {
           "type": "boolean",

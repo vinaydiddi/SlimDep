@@ -21,20 +21,23 @@ public sealed class ProjectAnalyzer : IProjectAnalyzer
         string projectDir = Path.GetDirectoryName(projectPath)
             ?? throw new SlimDepException($"Cannot determine directory for '{projectPath}'");
 
-        string assetsFile = Path.Combine(projectDir, "obj", "project.assets.json");
         var ct = options.CancellationToken;
-
         var sw = Stopwatch.StartNew();
 
-        // 1. Parse project.assets.json → packages, namespaces and the dependency graph
+        // 1. Parse project.assets.json → packages, namespaces and the dependency graph.
+        //    Its location honours UseArtifactsOutput / BaseIntermediateOutputPath.
+        string assetsFile = ProjectLayout.FindAssetsFile(projectPath);
+        string intermediateDir = Path.GetDirectoryName(assetsFile)!;
         AssetsInfo assets = await Task.Run(() => AssetsFileParser.Parse(assetsFile), ct).ConfigureAwait(false);
 
-        // 2. Collect namespaces referenced from .cs, .xaml and .razor files, plus global usings
-        //    declared in MSBuild (ImplicitUsings / <Using> items / generated GlobalUsings.g.cs)
+        // 2. Collect namespaces referenced from .cs, .xaml and .razor files (including <Compile>
+        //    items and shared projects outside the project folder), plus global usings declared in
+        //    MSBuild (ImplicitUsings / <Using> items / generated GlobalUsings.g.cs)
         NamespaceSet used = await Task.Run(() =>
         {
-            var ns = SourceAnalyzer.Collect(projectDir, ct);
-            ProjectUsingsResolver.ResolveInto(projectPath, ns, ct);
+            var compiled = ProjectLayout.CompiledSourceFiles(projectPath, ct);
+            var ns = SourceAnalyzer.Collect(projectDir, ct, compiled);
+            ProjectUsingsResolver.ResolveInto(projectPath, ns, intermediateDir, ct);
             return ns;
         }, ct).ConfigureAwait(false);
 
@@ -71,9 +74,17 @@ public sealed class ProjectAnalyzer : IProjectAnalyzer
             if (!pkg.IsDirect)
             {
                 if (isUsed)
+                {
                     undeclaredCandidates.Add(pkg);
+                }
                 else if (options.IncludeTransitive)
-                    unused.Add(TransitiveUnused(pkg));
+                {
+                    // Runtime-loaded and tooling packages are just as legitimate when transitive
+                    if (options.UseDefaultIgnores && DefaultIgnoreList.Match(pkg.Name) is string transitivePattern)
+                        skipped.Add(new SkippedPackage(pkg.Name, pkg.Version, $"Transitive; on the built-in safe list ({transitivePattern})"));
+                    else
+                        unused.Add(TransitiveUnused(pkg));
+                }
                 continue;
             }
 
@@ -145,25 +156,47 @@ public sealed class ProjectAnalyzer : IProjectAnalyzer
     }
 
     /// <summary>
-    /// A direct reference is a version pin when other packages in the graph depend on it, but
-    /// all of them ask for a lower version. Without the direct reference NuGet would resolve the
-    /// highest of those lower bounds, i.e. a downgrade — often re-introducing a vulnerable version.
+    /// A direct reference is a version pin on a target framework when other packages in that
+    /// target's graph depend on it, but all of them ask for a lower version than it resolves to.
+    /// Without the direct reference NuGet would resolve the highest of those lower bounds, i.e. a
+    /// downgrade — often re-introducing a vulnerable version. Each target is checked on its own,
+    /// because dependencies differ by TFM; the reference is kept if it pins on any target.
     /// </summary>
     internal static PinnedPackage? FindPin(PackageNamespaceInfo pkg)
     {
-        var reqs = pkg.RequiredBy
-            .Where(r => !r.Dependent.Equals(pkg.Name, StringComparison.OrdinalIgnoreCase))
-            .ToList();
-        if (reqs.Count == 0) return null;
+        var pinnedTargets = new List<string>();
+        string? lowestFallback = null;
+        string? pinnedVersion = null;
+        var requiredBy = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        string fallback = reqs
-            .Select(r => r.MinVersion)
-            .Aggregate((a, b) => PackageVersion.Compare(a, b) >= 0 ? a : b);
+        foreach (var target in pkg.Targets)
+        {
+            var reqs = target.RequiredBy
+                .Where(r => !r.Dependent.Equals(pkg.Name, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (reqs.Count == 0) continue;
 
-        if (PackageVersion.Compare(fallback, pkg.Version) >= 0)
-            return null; // removing it would keep the same version — not a pin
+            string fallback = reqs
+                .Select(r => r.MinVersion)
+                .Aggregate((a, b) => PackageVersion.Compare(a, b) >= 0 ? a : b);
 
-        return new PinnedPackage(pkg.Name, pkg.Version, fallback, reqs.Select(r => r.Dependent).ToList());
+            if (PackageVersion.Compare(fallback, target.ResolvedVersion) >= 0)
+                continue; // removing it would keep the same version on this target — not a pin here
+
+            pinnedTargets.Add(target.TargetFramework);
+            requiredBy.UnionWith(reqs.Select(r => r.Dependent));
+            if (lowestFallback is null || PackageVersion.Compare(fallback, lowestFallback) < 0)
+            {
+                lowestFallback = fallback;
+                pinnedVersion = target.ResolvedVersion;
+            }
+        }
+
+        if (lowestFallback is null) return null;
+
+        // Name the TFMs only when it disambiguates (the reference doesn't pin on every target)
+        IReadOnlyList<string>? tfms = pinnedTargets.Count < pkg.Targets.Count ? pinnedTargets : null;
+        return new PinnedPackage(pkg.Name, pinnedVersion ?? pkg.Version, lowestFallback, requiredBy.ToList(), tfms);
     }
 
     /// <summary>
@@ -205,7 +238,7 @@ public sealed class ProjectAnalyzer : IProjectAnalyzer
                 .ToList();
             if (usedNamespaces.Count == 0) continue;
 
-            frameworkNamespaces ??= FrameworkNamespaceProvider.GetNamespaces(assets.FrameworkReferences);
+            frameworkNamespaces ??= FrameworkNamespaceProvider.GetNamespaces(assets.FrameworkReferences, assets.TargetFrameworks);
             usedNamespaces.RemoveAll(frameworkNamespaces.Contains);
             if (usedNamespaces.Count == 0) continue;
 

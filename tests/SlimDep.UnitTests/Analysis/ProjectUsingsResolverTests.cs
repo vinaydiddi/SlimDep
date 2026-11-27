@@ -94,6 +94,81 @@ public sealed class ProjectUsingsResolverTests : IDisposable
     }
 
     [Fact]
+    public void ConditionalUsingRemove_IsNotApplied()
+    {
+        string csproj = WriteProject("""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <ItemGroup><Using Include="Dapper" /></ItemGroup>
+              <ItemGroup Condition="'$(Configuration)' == 'Release'"><Using Remove="Dapper" /></ItemGroup>
+              <ItemGroup><Using Remove="Serilog" Condition="'$(X)' == 'y'" /></ItemGroup>
+              <ItemGroup><Using Include="Serilog" /></ItemGroup>
+            </Project>
+            """);
+
+        var result = ProjectUsingsResolver.Resolve(csproj);
+
+        result.Should().Contain(["Dapper", "Serilog"], "Debug builds still import them");
+    }
+
+    [Fact]
+    public void ConditionalImplicitUsingsDisable_KeepsImplicitUsings()
+    {
+        string csproj = WriteProject("""
+            <Project Sdk="Microsoft.NET.Sdk.Worker">
+              <PropertyGroup><ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
+              <PropertyGroup Condition="'$(Configuration)' == 'Release'"><ImplicitUsings>disable</ImplicitUsings></PropertyGroup>
+            </Project>
+            """);
+
+        ProjectUsingsResolver.Resolve(csproj).Should().Contain("Microsoft.Extensions.Hosting");
+    }
+
+    [Fact]
+    public void ConditionalImplicitUsingsEnable_CountsAsEnabled()
+    {
+        string csproj = WriteProject("""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><ImplicitUsings>disable</ImplicitUsings></PropertyGroup>
+              <PropertyGroup><ImplicitUsings Condition="'$(TargetFramework)' == 'net8.0'">enable</ImplicitUsings></PropertyGroup>
+            </Project>
+            """);
+
+        ProjectUsingsResolver.Resolve(csproj).Should().Contain("System.Linq");
+    }
+
+    [Fact]
+    public void UnconditionalDisableAfterEnable_DisablesImplicitUsings()
+    {
+        string csproj = WriteProject("""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
+              <PropertyGroup><ImplicitUsings>disable</ImplicitUsings></PropertyGroup>
+            </Project>
+            """);
+
+        ProjectUsingsResolver.Resolve(csproj).Should().NotContain("System.Linq");
+    }
+
+    [Fact]
+    public void StaticAndAliasUsingItems_ResolveAsTypeNames()
+    {
+        string csproj = WriteProject("""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <ItemGroup>
+                <Using Include="FluentAssertions.Execution.AssertionScope" Static="true" />
+                <Using Include="Dapper.SqlMapper.GridReader" Alias="Grid" />
+              </ItemGroup>
+            </Project>
+            """);
+
+        var set = new NamespaceSet();
+        ProjectUsingsResolver.ResolveInto(csproj, set);
+
+        // The containing namespace is explicit evidence of use (SLIMDEP002)
+        set.Explicit.Should().Contain(["FluentAssertions.Execution", "Dapper"]);
+    }
+
+    [Fact]
     public void LegacyMsBuildNamespace_UsingItemsStillFound()
     {
         string csproj = WriteProject("""

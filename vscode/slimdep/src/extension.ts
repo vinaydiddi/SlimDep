@@ -1,3 +1,4 @@
+import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { UnusedPackagesProvider, PackageItem } from './providers/treeViewProvider';
@@ -89,14 +90,19 @@ async function scanWorkspace(provider: UnusedPackagesProvider): Promise<void> {
 }
 
 async function fixUnusedPackages(provider: UnusedPackagesProvider): Promise<void> {
-    const items = provider.getAllItems();
+    // Transitive findings are informational — fix can't remove them, so don't offer to
+    const items = provider.getRemovableItems();
+    const projectPaths = provider.getRemovableProjectPaths();
     if (items.length === 0) {
-        vscode.window.showInformationMessage('SlimDep: No unused packages to remove. Run a scan first.');
+        const transitiveOnly = provider.getAllItems().length > 0;
+        vscode.window.showInformationMessage(transitiveOnly
+            ? 'SlimDep: Only transitive packages were found. They cannot be removed from the project file.'
+            : 'SlimDep: No unused packages to remove. Run a scan first.');
         return;
     }
 
     const confirm = await vscode.window.showWarningMessage(
-        `SlimDep: Remove ${items.length} unused package(s) from ${provider.getProjectCount()} project(s)?`,
+        `SlimDep: Remove ${items.length} unused package(s) from ${projectPaths.length} project(s)?`,
         { modal: true },
         'Remove'
     );
@@ -106,7 +112,7 @@ async function fixUnusedPackages(provider: UnusedPackagesProvider): Promise<void
     const toolPath = vscode.workspace.getConfiguration('slimdep').get<string>('toolPath', 'slimdep');
 
     const failed: string[] = [];
-    for (const projectPath of provider.getProjectPaths()) {
+    for (const projectPath of projectPaths) {
         const result = await runSlimdep(toolPath, ['fix', projectPath]);
         if (!result.success) failed.push(`${path.basename(projectPath)}: ${result.error ?? 'unknown error'}`);
     }
@@ -116,24 +122,40 @@ async function fixUnusedPackages(provider: UnusedPackagesProvider): Promise<void
     } else {
         vscode.window.showInformationMessage('SlimDep: Unused packages removed. Run dotnet restore to update lockfile.');
     }
-    provider.clear();
-    provider.refresh();
+
+    // Re-scan rather than clearing, so findings fix didn't remove (transitive ones,
+    // failures) stay visible.
+    await scanWorkspace(provider);
+}
+
+/**
+ * Directory whose .slimdepignore SlimDep will read for this project: the nearest existing one
+ * walking up from the project (SlimDep stops at the first it finds), else the project's own
+ * workspace folder (correct in multi-root workspaces), else the project's directory.
+ */
+function ignoreFileDirectory(projectPath: string): string {
+    const projectDir = path.dirname(projectPath);
+    const workspaceDir = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(projectPath))?.uri.fsPath;
+
+    let dir = projectDir;
+    for (;;) {
+        if (fs.existsSync(path.join(dir, '.slimdepignore'))) return dir;
+        const parent = path.dirname(dir);
+        if (parent === dir) break;
+        dir = parent;
+    }
+    return workspaceDir ?? projectDir;
 }
 
 async function ignorePackage(item: PackageItem, provider: UnusedPackagesProvider): Promise<void> {
-    const workspaceFolders = vscode.workspace.workspaceFolders;
-    if (!workspaceFolders || workspaceFolders.length === 0) {
-        vscode.window.showErrorMessage('SlimDep: No workspace folder found.');
-        return;
-    }
-
-    const workspacePath = workspaceFolders[0].uri.fsPath;
+    const targetDir = ignoreFileDirectory(item.projectPath);
     const toolPath = vscode.workspace.getConfiguration('slimdep').get<string>('toolPath', 'slimdep');
 
-    const result = await runSlimdep(toolPath, ['ignore', 'add', item.packageName, '--path', workspacePath]);
+    const result = await runSlimdep(toolPath, ['ignore', 'add', item.packageName, '--path', targetDir]);
 
     if (result.success) {
-        vscode.window.showInformationMessage(`SlimDep: '${item.packageName}' added to .slimdepignore. Re-scanning...`);
+        vscode.window.showInformationMessage(
+            `SlimDep: '${item.packageName}' added to ${path.join(targetDir, '.slimdepignore')}. Re-scanning...`);
         await scanWorkspace(provider);
     } else {
         vscode.window.showErrorMessage(`SlimDep: Failed to ignore package — ${result.error ?? 'unknown error'}`);

@@ -30,14 +30,21 @@ public sealed record UndeclaredPackage(
 /// <param name="Version">Version pinned by the direct reference.</param>
 /// <param name="TransitiveVersion">Version that would be resolved without the pin.</param>
 /// <param name="RequiredBy">Packages (or "project X") that depend on it at the lower version.</param>
+/// <param name="TargetFrameworks">
+/// Target frameworks where the reference acts as a pin, when known. For multi-targeted projects
+/// a reference can be a pin on one TFM and redundant on another; it is kept if it pins any.
+/// </param>
 public sealed record PinnedPackage(
     string Name,
     string Version,
     string TransitiveVersion,
-    IReadOnlyList<string> RequiredBy)
+    IReadOnlyList<string> RequiredBy,
+    IReadOnlyList<string>? TargetFrameworks = null)
 {
     public string Reason =>
-        $"Version pin: overrides {TransitiveVersion} required by {string.Join(", ", RequiredBy)}. "
+        "Version pin"
+        + (TargetFrameworks is { Count: > 0 } ? $" on {string.Join(", ", TargetFrameworks)}" : string.Empty)
+        + $": overrides {TransitiveVersion} required by {string.Join(", ", RequiredBy)}. "
         + $"Removing it would downgrade {Name} to {TransitiveVersion}.";
 }
 

@@ -73,6 +73,12 @@ internal sealed class ScanCommand : Command
                 {
                     scanResults[i] = (null, $"Error ({Path.GetFileName(projectPath)}): {ex.Message}");
                 }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // Anything unexpected is a per-project error (exit 2), never "unused found" (exit 1),
+                    // and must not discard the other projects' results.
+                    scanResults[i] = (null, $"Error ({Path.GetFileName(projectPath)}): {ex.GetType().Name}: {ex.Message}");
+                }
                 finally
                 {
                     semaphore.Release();
@@ -97,8 +103,9 @@ internal sealed class ScanCommand : Command
 
                 status.WriteLine($"Scanning {Path.GetFileName(result.ProjectPath)} ...");
 
-                // SLIMDEP002 findings are informational unless --fail-on-undeclared is set
-                if (result.HasUnused || (failOnUndeclared && result.HasUndeclared))
+                // Transitive and SLIMDEP002 findings are informational: only unused direct references
+                // fail the scan, plus SLIMDEP002 when --fail-on-undeclared is set
+                if (result.UnusedPackages.Any(p => !p.IsTransitive) || (failOnUndeclared && result.HasUndeclared))
                     anyUnused = true;
 
                 successResults.Add(result);

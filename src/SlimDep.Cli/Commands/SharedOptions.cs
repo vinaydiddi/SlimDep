@@ -57,7 +57,8 @@ internal static class SharedOptions
 
         if (Directory.Exists(full))
         {
-            string[] csproj = Directory.GetFiles(full, "*.csproj", SearchOption.AllDirectories)
+            var options = new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true };
+            string[] csproj = Directory.GetFiles(full, "*.csproj", options)
                 .Where(p => !p.Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar])
                               .Contains("obj", StringComparer.OrdinalIgnoreCase))
                 .ToArray();

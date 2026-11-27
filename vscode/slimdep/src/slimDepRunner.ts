@@ -22,8 +22,11 @@ export async function runSlimdep(toolPath: string, args: string[]): Promise<RunR
             const code = (error as NodeJS.ErrnoException | null)?.code as unknown;
             const exitCode = error ? (typeof code === 'number' ? code : -1) : 0;
 
-            if (error && (code === 'ENOENT' || /not recognized|not found/i.test(stderr))) {
-                resolve({ success: false, exitCode, notFound: true, error: stderr || error.message });
+            // execFile launches the executable directly (no shell), so a missing CLI surfaces
+            // only as ENOENT. Don't match stderr text: real scan errors such as
+            // "project.assets.json not found" must not be mistaken for a missing CLI.
+            if (code === 'ENOENT') {
+                resolve({ success: false, exitCode, notFound: true, error: error?.message });
                 return;
             }
 

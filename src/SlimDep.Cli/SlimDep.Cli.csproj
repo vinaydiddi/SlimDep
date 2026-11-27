@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
     <ProjectReference Include="..\SlimDep.Analysis\SlimDep.Analysis.csproj" />
@@ -26,61 +26,28 @@
     <!-- Tool settings -->
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>slimdep</ToolCommandName>
+    <!-- Built for net8.0; let it run on newer runtimes (machines with only .NET 9 or 10 installed) -->
+    <RollForward>Major</RollForward>
 
     <!-- Package identity -->
     <PackageId>SlimDep</PackageId>
-    <Version>1.2.0</Version>
-    <PackageProjectUrl>https://www.nuget.org/packages/SlimDep</PackageProjectUrl>
+    <Version>1.2.1</Version>
+    <PackageProjectUrl>https://github.com/vinaydiddi/SlimDep</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/vinaydiddi/SlimDep</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
     <Description>Detect and remove unused NuGet package references in .NET projects.</Description>
     <PackageTags>nuget;dotnet-tool;unused;dependencies;packages;csproj;analyzer;cleanup;remove;detect;roslyn;static-analysis;sarif;package-reference;unused-packages;dependency-cleanup;dotnet;tool;net8;slim;nuget-cleanup;unused-nuget;dependency-analyzer;github-code-scanning</PackageTags>
     <PackageIcon>icon.png</PackageIcon>
     <PackageReadmeFile>README.md</PackageReadmeFile>
-    <PackageReleaseNotes>v1.2.0 — More trustworthy results.
+    <PackageReleaseNotes>1.2.1 — Safety fixes (upgrade recommended; 1.2.0 was never published).
 
-New features:
-- SLIMDEP002: flags transitive packages your code uses directly without a &lt;PackageReference&gt; (they can vanish when the package that brings them in changes). Ignores framework-provided namespaces, namespaces shared with direct packages, SDK implicit usings, project references and metapackages (e.g. xunit). Informational by default; --fail-on-undeclared makes it fail CI. Reported in console, JSON (undeclaredPackages) and SARIF (rule SLIMDEP002, level note).
-- Version-pin detection: a direct reference that raises the version of a transitive dependency (typically a security pin) is kept and listed as a pin instead of being reported unused, so fix no longer downgrades it.
-- Built-in safe list: test adapters, coverage collectors, SourceLink, versioning, design-time tools, analyzers, runtime-loaded providers and PrivateAssets="all" references are never reported as unused. Skipped packages are listed; --no-default-ignores disables the list.
-- JSON output gains undeclaredPackages, pinnedPackages and skippedPackages arrays.
+fix no longer removes packages that are actually used via: #elif branches, global:: calls, lower-case root namespaces (log4net), linked Compile items and shared .projitems, XAML using:/.axaml, Razor @inject/@model/@inherits/@attribute/@code, conditional Using/ImplicitUsings, or projects located under a folder named bin/obj. Version pins are checked per target framework.
 
-v1.1.1 — Bug-fix release.
+Also: byte-for-byte project-file edits (UTF-16, code pages, quotes, entities preserved); project.assets.json found via UseArtifactsOutput/BaseIntermediateOutputPath; unexpected errors exit 2 without losing other projects' results; transitive-only findings no longer fail scan; 'ignore add' no longer merges entries; runs on .NET 9/10-only machines.
 
-Fixes:
-- --include-transitive now works: unused transitive packages are reported (marked transitive, with the reference that brings them in); fix lists but never removes them
-- --format json / sarif to stdout now emit only the report (progress lines no longer corrupt it); multi-project JSON is a single array
-- Multi-targeted projects: every target framework is analysed, and usings inside #if blocks are counted
-- SDK implicit usings, &lt;Using&gt; items (csproj / Directory.Build.*) and generated GlobalUsings.g.cs are honoured; avoids removing e.g. Microsoft.Extensions.Hosting from Worker projects
-- fix keeps formatting, comments, line endings, BOM and XML declaration; keeps conditional or commented ItemGroups; reports packages it could not find in the project file; exits 2 on errors
-- Legacy MSBuild xmlns projects and global:: qualified names handled
-- SARIF tool version now comes from the assembly version
-- Invalid --format values are rejected instead of silently falling back to console
-- Implicit SDK references (autoReferenced) are never reported
+1.2.0 (included) — SLIMDEP002 (transitive packages used directly), version-pin detection, built-in safe list (--no-default-ignores), --fail-on-undeclared, new JSON arrays undeclaredPackages / pinnedPackages / skippedPackages.
 
-v1.1.0 — SARIF output support.
-
-New features:
-- SARIF 2.1.0 output format (--format sarif): machine-readable static analysis results consumed natively by GitHub Code Scanning and Azure DevOps, enabling inline PR annotations with zero pipeline scripting
-- Line number detection: each SARIF result now points to the exact line of the unused &lt;PackageReference&gt; element in the .csproj file
-- Multi-project SARIF: scanning a folder emits a single well-formed SARIF document (one run, all findings, all projects listed as artifacts)
-
-Usage:
-  slimdep scan . --format sarif
-  slimdep scan . --format sarif --output results.sarif
-
-Breaking changes: none
-
-v1.0.1 — Patch release.
-- Fixed Supported Features table rendering on NuGet.org (CRLF → LF line endings in README)
-
-v1.0.0 features:
-- Fully-qualified name detection: packages used via Foo.Bar.Type syntax (no using directive) are no longer false-positives
-- .slimdepignore support: add a .slimdepignore file to suppress specific packages from analysis
-- --ignore flag: suppress packages inline without a file (slimdep scan . --ignore Pkg1 --ignore Pkg2)
-- slimdep ignore command: manage .slimdepignore from the CLI (add / remove / list)
-- Central Package Management (CPM) support: GlobalPackageReference entries are automatically excluded
-- XAML namespace analysis: xmlns clr-namespace declarations in .xaml files (WPF, MAUI) are now scanned
-- Razor / CSHTML namespace analysis: @using directives in .razor and .cshtml files (Blazor, MVC) are now scanned
-- Parallel multi-project scanning: all projects scanned concurrently (bounded by CPU count)</PackageReleaseNotes>
+Full history: https://github.com/vinaydiddi/SlimDep/blob/main/CHANGELOG.md</PackageReleaseNotes>
   </PropertyGroup>
 
 </Project>

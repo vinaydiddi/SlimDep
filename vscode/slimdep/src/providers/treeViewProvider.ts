@@ -6,7 +6,7 @@ export interface ScanResultJson {
     totalDirectPackages: number;
     unusedCount: number;
     durationMs: number;
-    unusedPackages: Array<{ name: string; version?: string; reason: string }>;
+    unusedPackages: Array<{ name: string; version?: string; reason: string; transitive?: boolean }>;
 }
 
 export class PackageItem extends vscode.TreeItem {
@@ -15,11 +15,16 @@ export class PackageItem extends vscode.TreeItem {
         public readonly version: string | undefined,
         public readonly projectPath: string,
         public readonly reason: string,
+        /** Transitive findings are informational: `slimdep fix` cannot remove them. */
+        public readonly transitive: boolean = false,
     ) {
         super(packageName, vscode.TreeItemCollapsibleState.None);
-        this.description = version ?? '';
-        this.tooltip = reason;
-        this.iconPath = new vscode.ThemeIcon('package', new vscode.ThemeColor('charts.orange'));
+        this.description = transitive ? `${version ?? ''} (transitive)`.trim() : (version ?? '');
+        this.tooltip = transitive ? `${reason}\nTransitive: not removable from the project file.` : reason;
+        this.iconPath = transitive
+            ? new vscode.ThemeIcon('info', new vscode.ThemeColor('charts.blue'))
+            : new vscode.ThemeIcon('package', new vscode.ThemeColor('charts.orange'));
+        // Same context value so "Ignore" still works for both kinds
         this.contextValue = 'unusedPackage';
     }
 }
@@ -32,7 +37,9 @@ export class ProjectItem extends vscode.TreeItem {
         super(label, vscode.TreeItemCollapsibleState.Expanded);
         this.packages = packages;
         this.tooltip = projectPath;
-        this.description = `${packages.length} unused`;
+        const removable = packages.filter(p => !p.transitive).length;
+        const transitive = packages.length - removable;
+        this.description = transitive > 0 ? `${removable} unused, ${transitive} transitive` : `${removable} unused`;
         this.iconPath = new vscode.ThemeIcon('project', new vscode.ThemeColor('charts.red'));
         this.contextValue = 'project';
     }
@@ -48,7 +55,7 @@ export class UnusedPackagesProvider implements vscode.TreeDataProvider<vscode.Tr
         if (data.unusedCount === 0) return;
 
         const packageItems = data.unusedPackages.map(p =>
-            new PackageItem(p.name, p.version, projectPath, p.reason)
+            new PackageItem(p.name, p.version, projectPath, p.reason, p.transitive === true)
         );
 
         this._projects.push(new ProjectItem(projectPath, packageItems));
@@ -66,8 +73,20 @@ export class UnusedPackagesProvider implements vscode.TreeDataProvider<vscode.Tr
         return this._projects.flatMap(p => p.packages);
     }
 
+    /** Findings `slimdep fix` can actually remove (direct references only). */
+    getRemovableItems(): PackageItem[] {
+        return this.getAllItems().filter(p => !p.transitive);
+    }
+
     getProjectPaths(): string[] {
         return this._projects.map(p => p.tooltip as string);
+    }
+
+    /** Projects with at least one removable finding. */
+    getRemovableProjectPaths(): string[] {
+        return this._projects
+            .filter(p => p.packages.some(pkg => !pkg.transitive))
+            .map(p => p.tooltip as string);
     }
 
     getProjectCount(): number {

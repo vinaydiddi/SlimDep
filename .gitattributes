@@ -1,0 +1,2 @@
+# README.md is packed into the NuGet package; nuget.org renders tables incorrectly with CRLF.
+README.md text eol=lf

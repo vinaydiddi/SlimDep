@@ -50,6 +50,7 @@ internal sealed class AssetsFileParser
         //    across ALL target frameworks. Implicit SDK references (autoReferenced) are skipped
         //    because they are not in the project file and cannot be removed.
         var directNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var autoReferenced = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var privateAssetsAll = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var frameworkReferences = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var frameworks = doc["project"]?["frameworks"]?.AsObject();
@@ -61,7 +62,11 @@ internal sealed class AssetsFileParser
                 {
                     foreach (var dep in deps)
                     {
-                        if (GetBool(dep.Value, "autoReferenced")) continue;
+                        if (GetBool(dep.Value, "autoReferenced"))
+                        {
+                            autoReferenced.Add(dep.Key);
+                            continue;
+                        }
                         directNames.Add(dep.Key);
 
                         // PrivateAssets="all" is recorded as suppressParent: "All"
@@ -75,6 +80,9 @@ internal sealed class AssetsFileParser
                         frameworkReferences.Add(fwRef.Key);
             }
         }
+
+        // A package referenced explicitly by any TFM is a real reference, not an SDK implicit one
+        autoReferenced.ExceptWith(directNames);
 
         // 3. Get the library path map: "{Name/Version}" → relative path in cache
         var libraryPaths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -95,15 +103,25 @@ internal sealed class AssetsFileParser
 
         // 4. Walk every target (one per TFM, plus RID-specific ones) and merge per package.
         var merged = new Dictionary<string, Accumulator>(StringComparer.OrdinalIgnoreCase);
-        // dependency name → packages/projects that depend on it (reverse graph)
+        // dependency name → packages/projects that depend on it (reverse graph, all targets)
         var dependents = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
-        // dependency name → (dependent label → highest minimum version it asks for)
-        var requirements = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+        // TFM → dependency name → (dependent label → highest minimum version it asks for)
+        var requirements = new Dictionary<string, Dictionary<string, Dictionary<string, string>>>(StringComparer.OrdinalIgnoreCase);
+        // package name → TFM → resolved version
+        var resolved = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
         var projectNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var targetFrameworks = new List<string>();
 
         foreach (var target in targets)
         {
             if (target.Value is not JsonObject packages) continue;
+
+            // "net8.0/win-x64" → "net8.0": RID-specific graphs share their TFM's requirements
+            string tfm = target.Key.Split('/')[0];
+            if (!targetFrameworks.Contains(tfm, StringComparer.OrdinalIgnoreCase))
+                targetFrameworks.Add(tfm);
+            if (!requirements.TryGetValue(tfm, out var tfmRequirements))
+                requirements[tfm] = tfmRequirements = new(StringComparer.OrdinalIgnoreCase);
 
             foreach (var package in packages)
             {
@@ -128,8 +146,8 @@ internal sealed class AssetsFileParser
 
                         string? min = PackageVersion.LowerBound(GetString(dep.Value) ?? GetString(dep.Value, "version"));
                         if (min is null) continue;
-                        if (!requirements.TryGetValue(dep.Key, out var reqs))
-                            requirements[dep.Key] = reqs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                        if (!tfmRequirements.TryGetValue(dep.Key, out var reqs))
+                            tfmRequirements[dep.Key] = reqs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                         if (!reqs.TryGetValue(label, out var existing) || PackageVersion.Compare(min, existing) > 0)
                             reqs[label] = min;
                     }
@@ -137,6 +155,10 @@ internal sealed class AssetsFileParser
 
                 // Project references are part of the graph but are not analysed — only NuGet packages are.
                 if (type is not null && !type.Equals("package", StringComparison.OrdinalIgnoreCase)) continue;
+
+                if (!resolved.TryGetValue(packageName, out var versions))
+                    resolved[packageName] = versions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                versions.TryAdd(tfm, packageVersion);
 
                 bool isDirect = directNames.Contains(packageName);
                 var dllKeys = GetDllKeys(package.Value);
@@ -164,8 +186,23 @@ internal sealed class AssetsFileParser
             }
         }
 
-        var result = merged.Values
-            .Select(acc => new PackageNamespaceInfo
+        var result = new List<PackageNamespaceInfo>();
+        foreach (var acc in merged.Values)
+        {
+            IReadOnlyList<string> introducedBy = acc.IsDirect
+                ? []
+                : FindDirectAncestors(acc.Name, directNames, projectNames, autoReferenced, dependents);
+
+            // SDK implicit packages (e.g. NETStandard.Library) and everything that only they bring
+            // in are not the project's dependencies: never report them in any category.
+            if (!acc.IsDirect
+                && (autoReferenced.Contains(acc.Name)
+                    || (introducedBy.Count > 0 && introducedBy.All(i => i.StartsWith(SdkPrefix, StringComparison.Ordinal)))))
+            {
+                continue;
+            }
+
+            result.Add(new PackageNamespaceInfo
             {
                 Name = acc.Name,
                 Version = acc.Version,
@@ -173,14 +210,44 @@ internal sealed class AssetsFileParser
                 IsDirect = acc.IsDirect,
                 HasNoAssemblies = !acc.HasAssemblies,
                 PrivateAssetsAll = acc.IsDirect && privateAssetsAll.Contains(acc.Name),
-                IntroducedBy = acc.IsDirect ? [] : FindDirectAncestors(acc.Name, directNames, projectNames, dependents),
-                RequiredBy = requirements.TryGetValue(acc.Name, out var reqs)
-                    ? reqs.Select(r => new DependencyRequirement(r.Key, r.Value)).OrderBy(r => r.Dependent, StringComparer.OrdinalIgnoreCase).ToList()
-                    : [],
-            })
-            .ToList();
+                IntroducedBy = introducedBy.Where(i => !i.StartsWith(SdkPrefix, StringComparison.Ordinal)).ToList(),
+                Targets = BuildTargets(acc.Name, targetFrameworks, resolved, requirements),
+            });
+        }
 
-        return new AssetsInfo { Packages = result, FrameworkReferences = frameworkReferences.ToList() };
+        return new AssetsInfo
+        {
+            Packages = result,
+            FrameworkReferences = frameworkReferences.ToList(),
+            TargetFrameworks = targetFrameworks,
+        };
+    }
+
+    private const string SdkPrefix = "sdk ";
+
+    private static IReadOnlyList<TargetDependencies> BuildTargets(
+        string packageName,
+        List<string> targetFrameworks,
+        Dictionary<string, Dictionary<string, string>> resolved,
+        Dictionary<string, Dictionary<string, Dictionary<string, string>>> requirements)
+    {
+        if (!resolved.TryGetValue(packageName, out var versions)) return [];
+
+        var list = new List<TargetDependencies>();
+        foreach (string tfm in targetFrameworks)
+        {
+            if (!versions.TryGetValue(tfm, out var version)) continue;
+
+            IReadOnlyList<DependencyRequirement> reqs =
+                requirements.TryGetValue(tfm, out var tfmReqs) && tfmReqs.TryGetValue(packageName, out var byDependent)
+                    ? byDependent.Select(r => new DependencyRequirement(r.Key, r.Value))
+                                 .OrderBy(r => r.Dependent, StringComparer.OrdinalIgnoreCase)
+                                 .ToList()
+                    : [];
+
+            list.Add(new TargetDependencies(tfm, version, reqs));
+        }
+        return list;
     }
 
     private static string? GetString(JsonNode? node, string? property = null)
@@ -194,12 +261,14 @@ internal sealed class AssetsFileParser
 
     /// <summary>
     /// Walks the reverse dependency graph up to the direct package references (or project
-    /// references, labelled "project X") that pull in <paramref name="packageName"/>.
+    /// references, labelled "project X", and SDK implicit references, labelled "sdk X") that
+    /// pull in <paramref name="packageName"/>.
     /// </summary>
     private static IReadOnlyList<string> FindDirectAncestors(
         string packageName,
         HashSet<string> directNames,
         HashSet<string> projectNames,
+        HashSet<string> autoReferenced,
         Dictionary<string, HashSet<string>> dependents)
     {
         var result = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -219,6 +288,8 @@ internal sealed class AssetsFileParser
                     result.Add(parent);
                 else if (projectNames.Contains(parent))
                     result.Add($"project {parent}");
+                else if (autoReferenced.Contains(parent))
+                    result.Add(SdkPrefix + parent);
                 else
                     queue.Enqueue(parent);
             }
