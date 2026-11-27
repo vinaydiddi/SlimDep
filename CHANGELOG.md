@@ -10,7 +10,7 @@ Fixes from two code reviews of 1.2.0. **Upgrade recommended:** several of these 
 - Every branch of `#if`/`#elif`/`#else` chains is scanned. Before, only the first `#elif` branch was seen.
 - `global::Foo.Bar.Method()` calls count as usage.
 - Fully-qualified calls through lower-case root namespaces (`log4net.LogManager…`) count as usage.
-- Projects located under a folder named `bin` or `obj` are scanned. Before, they scanned no source at all. Only the project's own `bin/` and `obj/` are skipped. Nested folders named `Bin`/`Obj` are scanned, while dot-folders and nested projects are excluded, as in the SDK.
+- Projects located under a folder named `bin` or `obj` are scanned. Before, they scanned no source at all. Only the project's own `bin/` and `obj/` are skipped. Nested folders named `Bin`/`Obj` are scanned, and dot-folders are excluded, as in the SDK. Folders containing another project are scanned too, because the default glob compiles them. Their usage counts as "used" but not as SLIMDEP002 evidence, and their own `bin/`/`obj/` are skipped.
 - Linked `<Compile Include="../Shared/*.cs"/>` files and shared-project `.projitems` outside the project folder are scanned.
 - Version pins are evaluated per target framework. A reference that is redundant on `net8.0` but pins a higher version on `net48` is kept, and the reason names the framework.
 - Conditional `<Using Remove>` and conditional `ImplicitUsings` overrides no longer hide usings that apply in other configurations.
@@ -20,7 +20,7 @@ Fixes from two code reviews of 1.2.0. **Upgrade recommended:** several of these 
 
 ### Fixed: other
 - `fix` cuts only the removed elements from the original text. Attribute quotes and layout, entities, encoding (UTF-16 and declared code pages) and BOM are preserved byte-for-byte. Before, UTF-16 project files failed to parse.
-- `project.assets.json` is located via `MSBuildProjectExtensionsPath`, `BaseIntermediateOutputPath` and `UseArtifactsOutput`/`ArtifactsPath` before `obj/`, so artifacts-output projects work and a stale `obj/` isn't analysed.
+- `project.assets.json` is located via `MSBuildProjectExtensionsPath`, `BaseIntermediateOutputPath` and `UseArtifactsOutput`/`ArtifactsPath` before `obj/`, so artifacts-output projects work. When the output is unconditionally redirected, a stale `obj/` left behind is never analysed; SlimDep asks for a restore instead.
 - Unexpected per-project errors exit `2` instead of `1` ("unused found"), and no longer discard the other projects' results. Inaccessible folders are skipped.
 - With `--include-transitive`, transitive-only findings no longer make `scan` exit `1`.
 - SLIMDEP002 judges framework namespaces per target framework. `System.Text.Json` used on `net48` through a transitive package is now reported.
@@ -29,6 +29,12 @@ Fixes from two code reviews of 1.2.0. **Upgrade recommended:** several of these 
 - The safe list also applies to unused transitive packages. `SQLitePCLRaw.provider.*` was added.
 - The tool runs on machines with only .NET 9 or 10 installed (`RollForward=Major`).
 - JSON: pins that apply to some target frameworks only include `targetFrameworks`.
+- `fix`: when several `<PackageReference>`s on one line are removed, all of them are removed (one was skipped while still being reported as removed), and the line goes away entirely if nothing else is on it.
+- Razor `@code` blocks: `#if` branches are scanned, and comments, verbatim/raw strings and char literals containing `}` no longer end the block early.
+- No limit on `#if` symbols per file (32 before), so long `#elif` chains are scanned completely.
+- SLIMDEP002: the framework exemption uses the target frameworks where the package actually appears.
+- Cross-platform: MSBuild paths with `\` (`BaseIntermediateOutputPath`, `ArtifactsPath`, `.projitems` imports) resolve on Linux and macOS. File paths are compared case-sensitively on Linux.
+- CI: build and tests run on Ubuntu, Windows and macOS.
 
 ## 1.2.0 — 2026-11-27 (tagged, not published to NuGet; superseded by 1.2.1)
 

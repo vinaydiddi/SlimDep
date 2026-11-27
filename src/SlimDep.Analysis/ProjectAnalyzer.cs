@@ -218,7 +218,20 @@ public sealed class ProjectAnalyzer : IProjectAnalyzer
             assets.Packages.Where(p => p.IsDirect).SelectMany(p => p.Namespaces),
             StringComparer.Ordinal);
 
-        HashSet<string>? frameworkNamespaces = null;
+        // Framework namespaces depend on which target frameworks the package is present in: a
+        // System.Text.Json package that only exists in the net8.0 graph is exempt there, even if
+        // the project also targets net48. Cached per distinct set of frameworks.
+        var frameworkCache = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        HashSet<string> FrameworkNamespacesFor(PackageNamespaceInfo pkg)
+        {
+            var tfms = pkg.Targets.Select(t => t.TargetFramework).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            if (tfms.Count == 0) tfms = assets.TargetFrameworks.ToList();
+            string key = string.Join(";", tfms.OrderBy(t => t, StringComparer.OrdinalIgnoreCase));
+            if (!frameworkCache.TryGetValue(key, out var set))
+                frameworkCache[key] = set = FrameworkNamespaceProvider.GetNamespaces(assets.FrameworkReferences, tfms);
+            return set;
+        }
+
         var result = new List<UndeclaredPackage>();
 
         foreach (var pkg in candidates)
@@ -238,7 +251,7 @@ public sealed class ProjectAnalyzer : IProjectAnalyzer
                 .ToList();
             if (usedNamespaces.Count == 0) continue;
 
-            frameworkNamespaces ??= FrameworkNamespaceProvider.GetNamespaces(assets.FrameworkReferences, assets.TargetFrameworks);
+            var frameworkNamespaces = FrameworkNamespacesFor(pkg);
             usedNamespaces.RemoveAll(frameworkNamespaces.Contains);
             if (usedNamespaces.Count == 0) continue;
 

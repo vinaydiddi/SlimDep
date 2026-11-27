@@ -82,6 +82,25 @@ export class UnusedPackagesProvider implements vscode.TreeDataProvider<vscode.Tr
         return this._projects.map(p => p.tooltip as string);
     }
 
+    /**
+     * After a successful `slimdep fix`, drop the removed (direct) findings for those projects.
+     * Re-scanning straight away would bring them back: `fix` edits the .csproj but
+     * project.assets.json keeps listing them until the next `dotnet restore`.
+     * Transitive findings stay — fix never removes them.
+     */
+    markFixed(projectPaths: string[]): void {
+        const fixedSet = new Set(projectPaths.map(p => p.toLowerCase()));
+        this._projects = this._projects
+            .map(project => {
+                if (!fixedSet.has((project.tooltip as string).toLowerCase())) return project;
+                const remaining = project.packages.filter(p => p.transitive);
+                return remaining.length === project.packages.length
+                    ? project
+                    : new ProjectItem(project.tooltip as string, remaining);
+            })
+            .filter(project => project.packages.length > 0);
+    }
+
     /** Projects with at least one removable finding. */
     getRemovableProjectPaths(): string[] {
         return this._projects

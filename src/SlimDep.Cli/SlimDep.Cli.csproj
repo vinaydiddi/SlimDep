@@ -43,7 +43,7 @@
 
 fix no longer removes packages that are actually used via: #elif branches, global:: calls, lower-case root namespaces (log4net), linked Compile items and shared .projitems, XAML using:/.axaml, Razor @inject/@model/@inherits/@attribute/@code, conditional Using/ImplicitUsings, or projects located under a folder named bin/obj. Version pins are checked per target framework.
 
-Also: byte-for-byte project-file edits (UTF-16, code pages, quotes, entities preserved); project.assets.json found via UseArtifactsOutput/BaseIntermediateOutputPath; unexpected errors exit 2 without losing other projects' results; transitive-only findings no longer fail scan; 'ignore add' no longer merges entries; runs on .NET 9/10-only machines.
+Also: byte-for-byte project-file edits (UTF-16, code pages, quotes, entities preserved); project.assets.json found via UseArtifactsOutput/BaseIntermediateOutputPath; unexpected errors exit 2 without losing other projects' results; transitive-only findings no longer fail scan; 'ignore add' no longer merges entries; runs on .NET 9/10-only machines. Tested on Windows, Linux and macOS: MSBuild paths with '\' resolve on every OS, and file paths are compared case-sensitively on Linux.
 
 1.2.0 (included) — SLIMDEP002 (transitive packages used directly), version-pin detection, built-in safe list (--no-default-ignores), --fail-on-undeclared, new JSON arrays undeclaredPackages / pinnedPackages / skippedPackages.
 

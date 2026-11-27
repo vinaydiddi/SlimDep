@@ -97,13 +97,13 @@ References marked `PrivateAssets="all"` (development-only dependencies) are trea
 
 | Source | What counts as using a package's namespace |
 |---|---|
-| Packages | `project.assets.json`, with all target frameworks merged. Public namespaces are read from each package's DLL metadata and cached in-process. The assets file is found via `MSBuildProjectExtensionsPath`, `BaseIntermediateOutputPath`, or `UseArtifactsOutput`/`ArtifactsPath`, falling back to `obj/`. |
+| Packages | `project.assets.json`, with all target frameworks merged. Public namespaces are read from each package's DLL metadata and cached in-process. The assets file is found via `MSBuildProjectExtensionsPath`, `BaseIntermediateOutputPath`, or `UseArtifactsOutput`/`ArtifactsPath`, falling back to `obj/` only if restore could still write there. A stale `obj/` left behind after redirecting is never used. |
 | C# (Roslyn, syntax only) | `using`, `global using`, `using static`, aliases. Fully-qualified names in types and expressions, including `global::`. Every branch of `#if`/`#elif`/`#else`. |
 | Project files | `<ImplicitUsings>` (per SDK: Web, Worker, BlazorWebAssembly, WinForms), `<Using>` items (including `Static`/`Alias`) in the project and `Directory.Build.props/.targets`, and generated `*.GlobalUsings.g.cs`. |
 | XAML (`.xaml`, `.axaml`) | `xmlns` values `clr-namespace:` (WPF, MAUI, Avalonia) and `using:` (UWP, WinUI, Avalonia). |
 | Razor (`.razor`, `.cshtml`) | `@using` (incl. static/alias), `@inject`, `@model`, `@inherits`, `@implements`, `@attribute`, `@typeparam`, `@layout`, `@code`/`@functions` blocks, inline `@Foo.Bar…` expressions, `@addTagHelper`. |
 
-Which files are scanned: everything in the project folder except its own `bin/` and `obj/`, folders starting with `.`, and folders containing another project. Linked `<Compile Include="…">` files and shared-project `.projitems` outside the folder are scanned too.
+Which files are scanned: everything in the project folder except its own `bin/` and `obj/` and folders starting with `.`, plus linked `<Compile Include="…">` files and shared-project `.projitems` outside the folder. Folders containing another project are scanned too, because the SDK's default glob compiles them unless removed. Their usage keeps packages "used" but never triggers SLIMDEP002, and their `bin/`/`obj/` are skipped. MSBuild paths with `\` or `/` work on every OS.
 
 `.slimdepignore`: SlimDep uses the nearest file found by searching upward from the project. It has one package name per line, matched case-insensitively; `#` starts a comment.
 
@@ -160,6 +160,11 @@ On Azure DevOps, use `- script: slimdep scan .`. [More pipeline recipes →](htt
 - On .NET Framework targets, the .NET Standard API stands in for what the framework provides.
 - Razor files are scanned line by line, not with a full Razor parser.
 - C# only: no F# or VB.NET. Input is a `.csproj` or a folder; `.sln`/`.slnx` files aren't accepted.
+- `<Compile Remove>` isn't evaluated. Files the project excludes are still scanned, which can only make a package look used.
+
+## Building from source
+
+The tool runs on .NET 8, 9 or 10 (Windows, Linux, macOS). Building the repository needs a .NET SDK 9.0.200 or later because of `SlimDep.slnx`: `dotnet test SlimDep.slnx`. With an older SDK, use `dotnet test tests/SlimDep.UnitTests`. CI runs on Ubuntu, Windows and macOS.
 
 ## License
 

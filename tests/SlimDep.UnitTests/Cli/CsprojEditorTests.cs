@@ -179,6 +179,27 @@ public sealed class CsprojEditorTests : IDisposable
     }
 
     [Fact]
+    public void TwoElementsOnOneLine_BothRemoved_LineRemovedWhole()
+    {
+        Write("<Project>\n  <ItemGroup>\n    <PackageReference Include=\"A\" /> <PackageReference Include=\"B\" />\n    <PackageReference Include=\"C\" />\n  </ItemGroup>\n</Project>\n");
+
+        var removed = CsprojEditor.RemovePackageReferences(_path, ["A", "B"]);
+
+        removed.Should().BeEquivalentTo(["A", "B"]);
+        Read().Should().Be("<Project>\n  <ItemGroup>\n    <PackageReference Include=\"C\" />\n  </ItemGroup>\n</Project>\n");
+    }
+
+    [Fact]
+    public void ThreeElementsOnOneLine_OuterTwoRemoved_MiddleKept()
+    {
+        Write("<Project>\n  <ItemGroup>\n    <PackageReference Include=\"A\" /> <PackageReference Include=\"B\" /> <PackageReference Include=\"C\" />\n  </ItemGroup>\n</Project>\n");
+
+        CsprojEditor.RemovePackageReferences(_path, ["A", "C"]);
+
+        Read().Should().Be("<Project>\n  <ItemGroup>\n    <PackageReference Include=\"B\" />\n  </ItemGroup>\n</Project>\n");
+    }
+
+    [Fact]
     public void GreaterThanInsideAttributeAndComment_DoesNotConfuseSpan()
     {
         Write("<Project>\n  <ItemGroup>\n    <!-- <PackageReference Include=\"A\" /> -->\n    <PackageReference Include=\"A\" Condition=\"'$(V)' > '1'\" />\n    <PackageReference Include=\"B\" />\n  </ItemGroup>\n</Project>\n");

@@ -126,31 +126,42 @@ internal static class SourceAnalyzer
     internal static NamespaceSet Collect(string projectDirectory, CancellationToken ct, IEnumerable<string>? additionalCSharpFiles = null)
     {
         var result = new NamespaceSet();
+        // Files inside nested project folders: the SDK's default **/*.cs glob compiles them into this
+        // project too unless they are explicitly removed, which is common but can't be checked
+        // statically. Their usage counts as "used" (never remove a package they need) but not as
+        // explicit evidence for SLIMDEP002, since they usually belong to the other project.
+        var nested = new NamespaceSet();
         var parseOptions = new CSharpParseOptions(LanguageVersion.Preview);
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var seen = new HashSet<string>(MsBuildFiles.PathComparer);
 
-        // C# source files — using directives + fully-qualified names
-        foreach (var csFile in EnumerateProjectFiles(projectDirectory, ".cs").Concat(additionalCSharpFiles ?? []))
+        NamespaceSet Target(bool isNested) => isNested ? nested : result;
+
+        // C# source files — using directives + fully-qualified names. Files explicitly compiled via
+        // <Compile Include> come first so they count as this project's own even inside a nested folder.
+        var csFiles = (additionalCSharpFiles ?? []).Select(f => (Path: f, IsNested: false))
+            .Concat(EnumerateProjectFiles(projectDirectory, ".cs"));
+        foreach (var (csFile, isNested) in csFiles)
         {
             ct.ThrowIfCancellationRequested();
             if (seen.Add(Path.GetFullPath(csFile)))
-                CollectCSharpFile(csFile, parseOptions, result, ct);
+                CollectCSharpFile(csFile, parseOptions, Target(isNested), ct);
         }
 
         // XAML files — xmlns clr-namespace:/using: declarations (WPF, MAUI, UWP, WinUI, Avalonia)
-        foreach (var file in EnumerateProjectFiles(projectDirectory, ".xaml", ".axaml"))
+        foreach (var (file, isNested) in EnumerateProjectFiles(projectDirectory, ".xaml", ".axaml"))
         {
             ct.ThrowIfCancellationRequested();
-            CollectXamlFile(file, result);
+            CollectXamlFile(file, Target(isNested));
         }
 
         // Razor / CSHTML files — directives, @code blocks, inline expressions (Blazor, MVC, Razor Pages)
-        foreach (var file in EnumerateProjectFiles(projectDirectory, ".razor", ".cshtml"))
+        foreach (var (file, isNested) in EnumerateProjectFiles(projectDirectory, ".razor", ".cshtml"))
         {
             ct.ThrowIfCancellationRequested();
-            CollectRazorFile(file, parseOptions, result, ct);
+            CollectRazorFile(file, parseOptions, Target(isNested), ct);
         }
 
+        result.All.UnionWith(nested.All);
         return result;
     }
 
@@ -331,22 +342,78 @@ internal static class SourceAnalyzer
             "class __RazorCode {\n" + codeBlocks + "\n}\n";
         var root = CSharpSyntaxTree.ParseText(synthetic, parseOptions).GetRoot(ct);
         CollectFullyQualifiedNames(root, result);
+
+        // #if blocks inside @code get the same per-symbol passes as ordinary C# files
+        foreach (var symbolSet in ConditionalSymbolSets(root))
+        {
+            ct.ThrowIfCancellationRequested();
+            var altRoot = CSharpSyntaxTree
+                .ParseText(synthetic, parseOptions.WithPreprocessorSymbols(symbolSet))
+                .GetRoot(ct);
+            CollectFullyQualifiedNames(altRoot, result);
+        }
     }
 
-    /// <summary>Index of the '}' matching the '{' at <paramref name="open"/>, skipping string and char literals.</summary>
-    private static int FindMatchingBrace(string text, int open)
+    // A C# character literal: 'x', '\n', 'A', '\x41' — anything longer is an apostrophe in markup
+    private static readonly Regex CharLiteral = new(@"\G'(?:[^'\\\r\n]|\\[^\r\n]{1,9})'", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Index of the '}' matching the '{' at <paramref name="open"/>. Skips C# comments (// and
+    /// /* */), regular, verbatim (@"…") and raw ("""…""") string literals and char literals, so
+    /// braces inside them don't end the block early.
+    /// </summary>
+    internal static int FindMatchingBrace(string text, int open)
     {
         int depth = 0;
         for (int i = open; i < text.Length; i++)
         {
             char c = text[i];
-            if (c is '"' or '\'')
+            char next = i + 1 < text.Length ? text[i + 1] : '\0';
+
+            if (c == '/' && next == '/')
             {
-                // skip a literal, honouring backslash escapes
-                for (i++; i < text.Length && text[i] != c; i++)
-                    if (text[i] == '\\') i++;
+                int eol = text.IndexOf('\n', i);
+                i = eol < 0 ? text.Length : eol;
                 continue;
             }
+            if (c == '/' && next == '*')
+            {
+                int end = text.IndexOf("*/", i + 2, StringComparison.Ordinal);
+                i = end < 0 ? text.Length : end + 1;
+                continue;
+            }
+            if (c == '"')
+            {
+                if (string.CompareOrdinal(text, i, "\"\"\"", 0, 3) == 0)
+                {
+                    // raw string literal: ends at the next run of three quotes
+                    int end = text.IndexOf("\"\"\"", i + 3, StringComparison.Ordinal);
+                    i = end < 0 ? text.Length : end + 2;
+                    continue;
+                }
+                bool verbatim = i > 0 && (text[i - 1] == '@' || (text[i - 1] == '$' && i > 1 && text[i - 2] == '@'));
+                for (i++; i < text.Length; i++)
+                {
+                    if (verbatim)
+                    {
+                        if (text[i] == '"')
+                        {
+                            if (i + 1 < text.Length && text[i + 1] == '"') { i++; continue; } // "" escape
+                            break;
+                        }
+                    }
+                    else if (text[i] == '\\') i++;
+                    else if (text[i] == '"' || text[i] == '\n') break;
+                }
+                continue;
+            }
+            if (c == '\'')
+            {
+                var m = CharLiteral.Match(text, i);
+                if (m.Success) i += m.Length - 1;
+                continue; // an apostrophe in markup is just text
+            }
+
             if (c == '{') depth++;
             else if (c == '}' && --depth == 0) return i;
         }
@@ -357,39 +424,45 @@ internal static class SourceAnalyzer
 
     /// <summary>
     /// Enumerates files with the given extensions that the SDK's default globs would include:
-    /// everything under the project folder except its own <c>bin/</c> and <c>obj/</c>, folders
-    /// starting with '.', and folders containing another project (a nested project owns those
-    /// files). Paths above the project folder play no part, so a project located under some
-    /// folder named "bin" is scanned normally. Inaccessible folders are skipped.
+    /// everything under the project folder except its own <c>bin/</c> and <c>obj/</c> and folders
+    /// starting with '.'. Paths above the project folder play no part, so a project located under
+    /// some folder named "bin" is scanned normally. Inaccessible folders and symlinked folders are
+    /// skipped.
+    /// <para>
+    /// Files under a folder that contains another project are returned with <c>IsNested = true</c>
+    /// (the default glob still compiles them unless the project removes them). That nested
+    /// project's own <c>bin/</c> and <c>obj/</c> are build output and are skipped.
+    /// </para>
     /// </summary>
-    internal static IEnumerable<string> EnumerateProjectFiles(string projectDirectory, params string[] extensions)
+    internal static IEnumerable<(string Path, bool IsNested)> EnumerateProjectFiles(string projectDirectory, params string[] extensions)
     {
         var fileOptions = new EnumerationOptions { IgnoreInaccessible = true, AttributesToSkip = 0 };
         var dirOptions = new EnumerationOptions { IgnoreInaccessible = true, AttributesToSkip = FileAttributes.ReparsePoint };
 
-        var pending = new Stack<string>();
-        pending.Push(projectDirectory);
+        var pending = new Stack<(string Dir, bool IsNested, bool IsProjectRoot)>();
+        pending.Push((projectDirectory, false, true));
 
         while (pending.Count > 0)
         {
-            string dir = pending.Pop();
+            var (dir, isNested, isProjectRoot) = pending.Pop();
 
             foreach (string file in SafeEnumerate(() => Directory.EnumerateFiles(dir, "*", fileOptions)))
             {
                 if (extensions.Any(ext => file.EndsWith(ext, StringComparison.OrdinalIgnoreCase)))
-                    yield return file;
+                    yield return (file, isNested);
             }
 
             foreach (string sub in SafeEnumerate(() => Directory.EnumerateDirectories(dir, "*", dirOptions)))
             {
-                string name = Path.GetFileName(sub);
+                string name = System.IO.Path.GetFileName(sub);
                 if (name.StartsWith('.')) continue;
-                if (dir == projectDirectory
+                // bin/ and obj/ directly under this project or under a nested project are build output
+                if (isProjectRoot
                     && (name.Equals("bin", StringComparison.OrdinalIgnoreCase) || name.Equals("obj", StringComparison.OrdinalIgnoreCase)))
                     continue;
-                if (ContainsProjectFile(sub)) continue;
 
-                pending.Push(sub);
+                bool subIsProject = ContainsProjectFile(sub);
+                pending.Push((sub, isNested || subIsProject, subIsProject));
             }
         }
     }
@@ -431,15 +504,14 @@ internal static class SourceAnalyzer
         catch (IOException) { /* skip unreadable files */ }
     }
 
-    // Bounds the extra parses for files with unusually many distinct symbols.
-    private const int MaxIndividualSymbolParses = 32;
-
     private static IEnumerable<string[]> ConditionalSymbolSets(Microsoft.CodeAnalysis.SyntaxNode root)
     {
         var symbols = CollectConditionalSymbols(root);
         if (symbols.Count == 0) yield break;
 
-        foreach (string symbol in symbols.Take(MaxIndividualSymbolParses))
+        // One parse per symbol, with no cap: a capped count would silently skip later #elif
+        // branches. The cost is linear in the number of distinct symbols the file tests.
+        foreach (string symbol in symbols)
             yield return [symbol];
 
         if (symbols.Count > 1)
